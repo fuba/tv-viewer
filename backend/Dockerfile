@@ -12,7 +12,7 @@ RUN go build -o server cmd/server/main.go
 # Runtime stage
 FROM alpine:3.19
 
-RUN apk add --no-cache ca-certificates
+RUN apk add --no-cache ca-certificates ffmpeg
 
 WORKDIR /app
 

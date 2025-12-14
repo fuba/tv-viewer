@@ -2,11 +2,19 @@ package api
 
 import (
 	"database/sql"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
+	"strconv"
 
+	"github.com/fuba/tv-viewer/internal/encoder"
 	"github.com/fuba/tv-viewer/internal/mirakurun"
 	"github.com/gin-gonic/gin"
+)
+
+var (
+	encoderInstance = encoder.New()
 )
 
 func SetupRoutes(router *gin.Engine, db *sql.DB) {
@@ -48,6 +56,7 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 
 		// Streaming
 		api.GET("/stream/:channel/playlist.m3u8", getPlaylist(db))
+		api.GET("/stream/:channel/subtitles.ass", getSubtitles(db))
 		api.GET("/stream/:channel/:segment", getSegment(db))
 	}
 
@@ -95,19 +104,54 @@ func getChannels(db *sql.DB) gin.HandlerFunc {
 
 func streamChannel(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// TODO: Implement channel streaming
+		channelID := c.Param("id")
+		
+		mirakurunURL := os.Getenv("MIRAKURUN_URL")
+		if mirakurunURL == "" {
+			mirakurunURL = "http://tuner:40772"
+		}
+		
+		client := mirakurun.NewClient(mirakurunURL)
+		stream, err := client.GetChannelStream(channelID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to get channel stream",
+			})
+			return
+		}
+		defer stream.Close()
+		
+		// Start encoding
+		session, err := encoderInstance.StartEncoding(channelID, stream)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to start encoding",
+			})
+			return
+		}
+		
 		c.JSON(http.StatusOK, gin.H{
 			"status": "streaming",
+			"sessionId": session.ID,
+			"playlistUrl": "/api/stream/" + channelID + "/playlist.m3u8",
 		})
 	}
 }
 
 func getPrograms(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		serviceID := c.Query("serviceId")
-		if serviceID == "" {
+		serviceIDStr := c.Query("serviceId")
+		if serviceIDStr == "" {
 			c.JSON(http.StatusBadRequest, gin.H{
 				"error": "serviceId is required",
+			})
+			return
+		}
+		
+		serviceID, err := strconv.Atoi(serviceIDStr)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid serviceId",
 			})
 			return
 		}
@@ -117,21 +161,64 @@ func getPrograms(db *sql.DB) gin.HandlerFunc {
 			mirakurunURL = "http://tuner:40772"
 		}
 		
-		// TODO: Convert serviceID string to int and fetch programs
-		c.JSON(http.StatusOK, []gin.H{})
+		client := mirakurun.NewClient(mirakurunURL)
+		programs, err := client.GetPrograms(serviceID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to fetch programs",
+			})
+			return
+		}
+		
+		c.JSON(http.StatusOK, programs)
 	}
 }
 
 func getPlaylist(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// TODO: Implement HLS playlist generation
-		c.String(http.StatusOK, "#EXTM3U\n")
+		channelID := c.Param("channel")
+		playlistPath := encoderInstance.GetPlaylistPath(channelID)
+		
+		// Check if playlist exists
+		if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		
+		c.File(playlistPath)
+	}
+}
+
+func getSubtitles(db *sql.DB) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		channelID := c.Param("channel")
+		subtitlePath := encoderInstance.GetSubtitlePath(channelID)
+		
+		// Check if subtitle file exists
+		if _, err := os.Stat(subtitlePath); os.IsNotExist(err) {
+			// Return empty ASS file if no subtitles
+			c.Header("Content-Type", "text/plain; charset=utf-8")
+			c.String(http.StatusOK, "[Script Info]\nTitle: Empty\n\n[V4+ Styles]\n\n[Events]\n")
+			return
+		}
+		
+		c.File(subtitlePath)
 	}
 }
 
 func getSegment(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		// TODO: Implement segment serving
-		c.Status(http.StatusNotFound)
+		channelID := c.Param("channel")
+		segment := c.Param("segment")
+		
+		segmentPath := filepath.Join("stream", channelID, segment)
+		
+		// Check if segment exists
+		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+			c.Status(http.StatusNotFound)
+			return
+		}
+		
+		c.File(segmentPath)
 	}
 }

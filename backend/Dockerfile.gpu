@@ -1,0 +1,41 @@
+# Dockerfile with GPU/NVENC support
+FROM golang:1.21-bookworm AS builder
+
+RUN apt-get update && apt-get install -y \
+    gcc \
+    libsqlite3-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+COPY go.mod go.sum ./
+RUN go mod download
+
+COPY . .
+RUN CGO_ENABLED=1 GOOS=linux go build -o server cmd/server/main.go
+
+# Runtime image with NVENC support
+FROM nvidia/cuda:12.0.1-runtime-ubuntu22.04
+
+RUN apt-get update && apt-get install -y \
+    ca-certificates \
+    wget \
+    xz-utils \
+    libsqlite3-0 \
+    # FFmpeg dependencies
+    libgomp1 \
+    && rm -rf /var/lib/apt/lists/*
+
+# Download FFmpeg with NVENC support
+RUN wget -q https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-master-latest-linux64-gpl.tar.xz \
+    && tar -xf ffmpeg-master-latest-linux64-gpl.tar.xz \
+    && cp ffmpeg-master-latest-linux64-gpl/bin/ffmpeg /usr/local/bin/ \
+    && cp ffmpeg-master-latest-linux64-gpl/bin/ffprobe /usr/local/bin/ \
+    && rm -rf ffmpeg-master-latest-linux64-gpl* \
+    && chmod +x /usr/local/bin/ffmpeg /usr/local/bin/ffprobe
+
+WORKDIR /app
+COPY --from=builder /app/server .
+
+EXPOSE 8090
+CMD ["./server"]

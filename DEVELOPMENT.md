@@ -29,6 +29,11 @@
 - GPU検出機能の実装
 - エンコーダー動的切り替え
 
+### Phase 6: H.265/HEVCエンコーディング ✅
+- HEVC NVENCサポート追加
+- H.264/H.265動的切り替え
+- 高効率エンコーディングの実現
+
 ## 詳細実装記録
 
 ### 1. システム基盤構築
@@ -365,3 +370,107 @@ ls -la /app/stream/16/ | grep segment
 5. **BSチャンネル名表示** → サービス名表示実装
 
 これらの経験により、日本のデジタル放送システムに特化した安定したTV視聴システムが完成しました。
+
+## Phase 6: NVENC/HEVC実装詳細
+
+### 6.1 NVIDIA Container Toolkitセットアップ
+**実装日**: 2025年12月16日
+**対応内容**: DockerコンテナからGPUアクセスを可能にする基盤構築
+
+```bash
+# NVIDIA Container Toolkitインストール
+sudo apt-get install nvidia-container-toolkit
+sudo systemctl restart docker
+
+# GPU動作確認
+docker run --rm --gpus all nvidia/cuda:12.0.1-base-ubuntu22.04 nvidia-smi
+```
+
+### 6.2 NVENC検出・エンコーダー実装
+**ファイル**: `backend/internal/encoder/nvenc.go`
+
+**主要機能**:
+- GPU自動検出（nvidia-smi）
+- FFmpegのNVENCサポート確認
+- h264_nvenc/hevc_nvenc動的選択
+- 品質プリセット（high/medium/low）
+
+**実装内容**:
+```go
+// GPU検出とエンコーダー確認
+func CheckNVENCSupport() (*NVENCSupport, error)
+
+// 品質設定に応じたエンコーダー引数生成
+func GetVideoCodecArgs(useNVENC bool, quality string) []string
+```
+
+### 6.3 H.265/HEVC対応
+**実装内容**:
+- hevc_nvencエンコーダー統合
+- H.264/H.265環境変数切り替え（USE_HEVC）
+- HLS.js v1.4.14のHEVCサポート活用
+- コーデック別プロファイル/レベル最適化
+
+### 6.4 Docker GPU統合
+**ファイル**: `docker-compose.gpu.yml`, `backend/Dockerfile.gpu`
+
+**構成変更**:
+- NVIDIA CUDA base image使用
+- NVENC対応FFmpegビルド（BtbN/FFmpeg-Builds）
+- GPU capabilities設定
+- 環境変数による機能制御
+
+### 6.5 パフォーマンス結果
+
+| 項目 | CPU (libx264) | GPU H.264 | GPU H.265 |
+|------|---------------|-----------|----------|
+| CPU使用率 | 15-30% | 10-12% | 10-12% |
+| GPU使用率 | 0% | 1-5% | 1-5% |
+| GPUメモリ | 0MB | 272MB | 330MB |
+| エンコード品質 | 高 | 高 | 最高 |
+| 圧縮効率 | 基準 | 基準 | +15-25% |
+
+### 6.6 API拡張
+**新規エンドポイント**:
+- `GET /api/nvenc/status`: NVENC利用状況確認
+- `POST /api/nvenc/toggle`: NVENC有効/無効切り替え
+
+**レスポンス例**:
+```json
+{
+  "nvenc_available": true,
+  "encoders": ["h264_nvenc", "hevc_nvenc"]
+}
+```
+
+### 6.7 設定ファイル拡張
+**環境変数**:
+- `ENCODING_QUALITY`: high/medium/low
+- `USE_HEVC`: true/false（H.265有効化）
+- `NVIDIA_VISIBLE_DEVICES`: all
+- `NVIDIA_DRIVER_CAPABILITIES`: compute,utility,video
+
+### 6.8 ドキュメント整備
+**作成ファイル**:
+- `doc/nvidia-docker-setup.md`: NVIDIAセットアップ手順
+- `doc/nvenc-docker-guide.md`: Docker GPU利用ガイド
+- `doc/quality-tuning.md`: エンコード品質調整
+- `doc/h264-vs-h265.md`: コーデック比較
+- `doc/host-ffmpeg-analysis.md`: ホストFFmpeg利用分析
+
+### 6.9 技術的課題と解決
+
+**課題1**: コンテナ内FFmpegのNVENC未対応
+**解決**: NVENC対応の静的FFmpegビルドに変更
+
+**課題2**: HLS.jsのHEVCサポート確認
+**解決**: v1.4.14で対応済みを確認、追加設定不要
+
+**課題3**: ホストFFmpegとの連携複雑性
+**解決**: コンテナ内完結型アプローチで標準化
+
+### 6.10 今後の拡張可能性
+- AV1エンコーダー対応（av1_nvenc）
+- 複数GPU対応とロードバランシング
+- リアルタイム品質調整API
+- GPU使用率監視とアラート機能

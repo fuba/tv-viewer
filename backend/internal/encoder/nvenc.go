@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"fmt"
 	"log"
+	"os"
 	"os/exec"
 	"strings"
 )
@@ -79,65 +80,111 @@ func CheckNVENCSupport() (*NVENCSupport, error) {
 
 // GetVideoCodecArgs returns the appropriate video codec arguments based on NVENC availability
 func GetVideoCodecArgs(useNVENC bool, quality string) []string {
+	// Check if HEVC is requested
+	useHEVC := os.Getenv("USE_HEVC") == "true"
+	
 	if useNVENC {
+		// Choose codec based on HEVC preference
+		codec := "h264_nvenc"
+		if useHEVC {
+			codec = "hevc_nvenc"
+		}
+		
 		// NVENC hardware encoding arguments
 		switch quality {
 		case "high":
-			return []string{
-				"-c:v", "h264_nvenc",
-				"-preset", "p4", // p4 = medium quality/speed
+			args := []string{
+				"-c:v", codec,
+				"-preset", "p5", // p5 = slower encoding, better quality
 				"-tune", "hq",
 				"-rc", "vbr",
-				"-cq", "23",
+				"-cq", "19", // Lower CQ = higher quality (0-51, lower is better)
 				"-b:v", "0",
-				"-maxrate", "5M",
-				"-bufsize", "10M",
-				"-profile:v", "high",
-				"-level", "4.1",
+				"-maxrate", "10M", // Increased for better quality
+				"-bufsize", "20M",
 			}
+			
+			// Add codec-specific profile and level
+			if useHEVC {
+				args = append(args, "-profile:v", "main", "-level", "5.1")
+			} else {
+				args = append(args, "-profile:v", "high", "-level", "4.2")
+			}
+			
+			// Add quality enhancement options
+			args = append(args,
+				"-b_ref_mode", "2", // Better B-frame handling
+				"-temporal-aq", "1", // Temporal AQ for better quality
+				"-spatial-aq", "1", // Spatial AQ for better quality
+			)
+			
+			return args
+			
 		case "medium":
-			return []string{
-				"-c:v", "h264_nvenc",
-				"-preset", "p2", // p2 = fast
+			args := []string{
+				"-c:v", codec,
+				"-preset", "p4", // p4 = balanced quality/speed
+				"-tune", "hq",
 				"-rc", "vbr",
-				"-cq", "26",
+				"-cq", "22", // Improved quality (was 26)
 				"-b:v", "0",
-				"-maxrate", "3M",
-				"-bufsize", "6M",
-				"-profile:v", "main",
-				"-level", "4.1",
+				"-maxrate", "6M", // Increased bitrate
+				"-bufsize", "12M",
 			}
+			
+			// Add codec-specific profile and level
+			if useHEVC {
+				args = append(args, "-profile:v", "main", "-level", "5.0")
+			} else {
+				args = append(args, "-profile:v", "high", "-level", "4.1")
+			}
+			
+			args = append(args, "-spatial-aq", "1") // Spatial AQ for better quality
+			return args
+			
 		default: // low/fast
-			return []string{
-				"-c:v", "h264_nvenc",
-				"-preset", "p1", // p1 = fastest
+			args := []string{
+				"-c:v", codec,
+				"-preset", "p2", // p2 = fast (was p1)
 				"-rc", "vbr",
-				"-cq", "30",
+				"-cq", "26", // Better quality than 30
 				"-b:v", "0",
-				"-maxrate", "2M",
-				"-bufsize", "4M",
-				"-profile:v", "main",
-				"-level", "4.0",
+				"-maxrate", "4M", // Increased
+				"-bufsize", "8M",
 			}
+			
+			// Add codec-specific profile and level
+			if useHEVC {
+				args = append(args, "-profile:v", "main", "-level", "4.1")
+			} else {
+				args = append(args, "-profile:v", "main", "-level", "4.1")
+			}
+			
+			return args
 		}
 	} else {
-		// CPU encoding with libx264
+		// CPU encoding with libx264 or libx265
+		codec := "libx264"
+		if useHEVC {
+			codec = "libx265"
+		}
+		
 		switch quality {
 		case "high":
 			return []string{
-				"-c:v", "libx264",
+				"-c:v", codec,
 				"-preset", "fast",
 				"-crf", "20",
 			}
 		case "medium":
 			return []string{
-				"-c:v", "libx264",
+				"-c:v", codec,
 				"-preset", "veryfast",
 				"-crf", "23",
 			}
 		default: // low/fast
 			return []string{
-				"-c:v", "libx264",
+				"-c:v", codec,
 				"-preset", "ultrafast",
 				"-crf", "26",
 			}

@@ -129,19 +129,24 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 	go e.cleanOldSegments(outputDir, ctx)
 	
 	// FFmpeg command for HLS encoding (subtitles will be extracted separately if needed)
-	ffmpegPath, err := exec.LookPath("ffmpeg")
-	if err != nil {
-		// Try common locations
-		for _, path := range []string{"/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"} {
-			if _, err := os.Stat(path); err == nil {
-				ffmpegPath = path
-				break
+	ffmpegPath := os.Getenv("FFMPEG_PATH")
+	if ffmpegPath == "" {
+		var err error
+		ffmpegPath, err = exec.LookPath("ffmpeg")
+		if err != nil {
+			// Try common locations
+			for _, path := range []string{"/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"} {
+				if _, err := os.Stat(path); err == nil {
+					ffmpegPath = path
+					break
+				}
+			}
+			if ffmpegPath == "" {
+				return nil, fmt.Errorf("ffmpeg not found in PATH")
 			}
 		}
-		if ffmpegPath == "" {
-			return nil, fmt.Errorf("ffmpeg not found in PATH")
-		}
 	}
+	log.Printf("Using FFmpeg at: %s", ffmpegPath)
 	
 	var cmd *exec.Cmd
 	
@@ -159,7 +164,8 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 			"-map", "0:1", "-map", "0:2",
 		)
 		// Add video codec args based on NVENC availability
-		cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, "low")...)
+		quality := GetEncodingQuality()
+		cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, quality)...)
 		cmd.Args = append(cmd.Args,
 			"-c:a", "aac",
 			"-b:a", "128k",
@@ -193,7 +199,8 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 				"-map", "0:a:0", // Map first audio stream (remove ? to make it required)
 			)
 			// Add video codec args based on NVENC availability
-			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, "medium")...)
+			quality := GetEncodingQuality()
+			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, quality)...)
 			cmd.Args = append(cmd.Args,
 				"-r", "30",
 				"-g", "30",
@@ -234,7 +241,8 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 				"-map", "0:a:0", // Map first audio stream (remove ? to make it required)
 			)
 			// Add video codec args based on NVENC availability
-			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, "medium")...)
+			quality := GetEncodingQuality()
+			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, quality)...)
 			cmd.Args = append(cmd.Args,
 				"-r", "30", // Force 30fps output
 				"-g", "30", // GOP size (1 second at 30fps for 2-second segments)

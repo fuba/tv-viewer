@@ -1,0 +1,14 @@
+# Use host FFmpeg with NVENC support
+# Usage: docker compose -f docker-compose.yml -f docker-compose.host-ffmpeg.yml up -d
+
+services:
+  backend:
+    volumes:
+      # Mount host ffmpeg binary
+      - /usr/bin/ffmpeg:/usr/local/bin/ffmpeg:ro
+      - /usr/bin/ffprobe:/usr/local/bin/ffprobe:ro
+      # Mount stream directory to host path for direct access
+      - ./stream:/app/stream
+    environment:
+      # Use host ffmpeg
+      - FFMPEG_PATH=/usr/local/bin/ffmpeg

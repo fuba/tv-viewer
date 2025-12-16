@@ -3,6 +3,9 @@
 
 services:
   backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.gpu
     # Enable GPU access
     deploy:
       resources:
@@ -15,3 +18,7 @@ services:
       # Additional environment variables for GPU support
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      # Encoding quality: high, medium, low (default: high)
+      - ENCODING_QUALITY=high
+      # Use HEVC/H.265 encoding (default: false, uses H.264)
+      - USE_HEVC=true

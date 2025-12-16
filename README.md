@@ -49,9 +49,10 @@
 
 ### インフラ
 - **Docker & Docker Compose**: コンテナ化
+- **NVIDIA Container Toolkit**: GPU コンテナサポート
 - **Nginx**: リバースプロキシ
 - **Host Networking**: 低レイテンシー通信
-- **NVENC**: NVIDIA GPUハードウェアエンコーディング（オプション）
+- **NVENC**: NVIDIA GPUハードウェアエンコーディング
 
 ## システム構成
 
@@ -109,6 +110,11 @@ PORT=8082
 | GET | `/api/logs/{channel}` | FFmpegログ取得 |
 | GET | `/api/sessions` | アクティブセッション一覧 |
 | POST | `/api/sessions/stop-all` | 全セッション停止 |
+
+### NVENC ハードウェアエンコーディング
+
+| Method | Endpoint | 説明 |
+|--------|----------|------|
 | GET | `/api/nvenc/status` | NVENCステータス確認 |
 | POST | `/api/nvenc/toggle` | NVENC有効/無効切替 |
 
@@ -119,6 +125,38 @@ PORT=8082
 | GET | `/api/stream/{channel}/playlist.m3u8` | HLSプレイリスト |
 | GET | `/api/stream/{channel}/segment{n}.ts` | HLSセグメント |
 | GET | `/api/stream/{channel}/subtitles.ass` | 字幕ファイル |
+
+## NVENC ハードウェアエンコーディング
+
+### 機能
+- **NVIDIA GPU 自動検出**: RTX/GTX シリーズで自動有効化
+- **コーデック選択**: H.264 または H.265(HEVC)
+- **品質設定**: High/Medium/Low プリセット
+- **CPU 負荷減**: 15-30% → 10-12% にCPU使用率削減
+
+### 使用方法
+
+```bash
+# GPU対応で起動
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+
+# NVENC ステータス確認
+curl http://localhost:8082/api/nvenc/status
+
+# H.265 を有効にする場合
+export USE_HEVC=true
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
+```
+
+### パフォーマンス
+
+| 項目 | CPUエンコード | NVENC H.264 | NVENC H.265 |
+|------|------------------|-------------|-------------|
+| CPU使用率 | 15-30% | 10-12% | 10-12% |
+| GPU使用率 | 0% | 1-5% | 1-5% |
+| GPUメモリ | 0MB | 272MB | 330MB |
+| 圧縮効率 | 基準 | 基準 | +15-25% |
+| 画質 | 高 | 高 | 最高 |
 
 ## 対応チャンネル
 

@@ -18,6 +18,8 @@ type Encoder struct {
 	sessions      map[string]*Session
 	maxConcurrent int
 	logs          map[string][]string
+	nvencSupport  *NVENCSupport
+	useNVENC      bool
 }
 
 type Session struct {
@@ -30,11 +32,27 @@ type Session struct {
 }
 
 func New() *Encoder {
-	return &Encoder{
+	e := &Encoder{
 		sessions:      make(map[string]*Session),
 		maxConcurrent: 1, // Limit to 1 concurrent encoding for now
 		logs:          make(map[string][]string),
 	}
+	
+	// Check NVENC support
+	nvencSupport, err := CheckNVENCSupport()
+	if err != nil {
+		log.Printf("Error checking NVENC support: %v", err)
+	} else {
+		e.nvencSupport = nvencSupport
+		e.useNVENC = nvencSupport.Available
+		if e.useNVENC {
+			log.Printf("NVENC hardware encoding enabled")
+		} else {
+			log.Printf("Using CPU encoding (libx264)")
+		}
+	}
+	
+	return e
 }
 
 func (e *Encoder) StartEncoding(channelID string, input io.ReadCloser) (*Session, error) {
@@ -139,10 +157,10 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 			"-y",
 			// Select first program's streams
 			"-map", "0:1", "-map", "0:2",
-			// Encode for compatibility
-			"-c:v", "libx264",
-			"-preset", "ultrafast",
-			"-crf", "30", // Lower quality for CS
+		)
+		// Add video codec args based on NVENC availability
+		cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, "low")...)
+		cmd.Args = append(cmd.Args,
 			"-c:a", "aac",
 			"-b:a", "128k",
 			// HLS output
@@ -173,10 +191,10 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 				// Use automatic stream selection for BS channels with fallback
 				"-map", "0:v:0", // Map first video stream (remove ? to make it required)
 				"-map", "0:a:0", // Map first audio stream (remove ? to make it required)
-				// Video encoding
-				"-c:v", "libx264",
-				"-preset", "veryfast",
-				"-crf", "23",
+			)
+			// Add video codec args based on NVENC availability
+			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, "medium")...)
+			cmd.Args = append(cmd.Args,
 				"-r", "30",
 				"-g", "30",
 				"-keyint_min", "30",
@@ -214,10 +232,10 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 				// Stream selection - more robust mapping
 				"-map", "0:v:0", // Map first video stream (remove ? to make it required)
 				"-map", "0:a:0", // Map first audio stream (remove ? to make it required)
-				// Video encoding for HLS
-				"-c:v", "libx264",
-				"-preset", "veryfast",
-				"-crf", "23",
+			)
+			// Add video codec args based on NVENC availability
+			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, "medium")...)
+			cmd.Args = append(cmd.Args,
 				"-r", "30", // Force 30fps output
 				"-g", "30", // GOP size (1 second at 30fps for 2-second segments)
 				"-keyint_min", "30",
@@ -481,4 +499,35 @@ func (e *Encoder) GetChannelLogs(channelID string) []string {
 		return result
 	}
 	return []string{}
+}
+
+// GetNVENCStatus returns the current NVENC support status
+func (e *Encoder) GetNVENCStatus() map[string]interface{} {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	
+	status := map[string]interface{}{
+		"nvenc_available": e.useNVENC,
+		"encoders":        []string{},
+	}
+	
+	if e.nvencSupport != nil {
+		status["encoders"] = e.nvencSupport.Encoders
+	}
+	
+	return status
+}
+
+// SetUseNVENC enables or disables NVENC usage
+func (e *Encoder) SetUseNVENC(use bool) error {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	
+	if use && (e.nvencSupport == nil || !e.nvencSupport.Available) {
+		return fmt.Errorf("NVENC is not available on this system")
+	}
+	
+	e.useNVENC = use
+	log.Printf("NVENC usage set to: %v", use)
+	return nil
 }

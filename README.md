@@ -51,6 +51,7 @@
 - **Docker & Docker Compose**: コンテナ化
 - **Nginx**: リバースプロキシ
 - **Host Networking**: 低レイテンシー通信
+- **NVENC**: NVIDIA GPUハードウェアエンコーディング（オプション）
 
 ## システム構成
 
@@ -69,6 +70,7 @@
 ### 前提条件
 - Docker & Docker Compose
 - Mirakurunサーバーが稼働中（`localhost:40772`）
+- （オプション）NVIDIA GPU + NVIDIA Container Toolkit（NVENC使用時）
 
 ### 起動方法
 
@@ -79,6 +81,9 @@ cd tv-viewer
 
 # コンテナをビルド・起動
 docker compose up -d
+
+# GPU搭載システムでNVENCを使用する場合
+docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 # フロントエンドにアクセス
 open http://localhost:3001
@@ -104,6 +109,8 @@ PORT=8082
 | GET | `/api/logs/{channel}` | FFmpegログ取得 |
 | GET | `/api/sessions` | アクティブセッション一覧 |
 | POST | `/api/sessions/stop-all` | 全セッション停止 |
+| GET | `/api/nvenc/status` | NVENCステータス確認 |
+| POST | `/api/nvenc/toggle` | NVENC有効/無効切替 |
 
 ### HLSストリーミング
 

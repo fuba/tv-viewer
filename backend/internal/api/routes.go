@@ -71,6 +71,33 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 			})
 		})
 
+		// Get NVENC status
+		api.GET("/nvenc/status", func(c *gin.Context) {
+			status := encoderInstance.GetNVENCStatus()
+			c.JSON(http.StatusOK, status)
+		})
+
+		// Toggle NVENC usage
+		api.POST("/nvenc/toggle", func(c *gin.Context) {
+			var req struct {
+				Enabled bool `json:"enabled"`
+			}
+			if err := c.ShouldBindJSON(&req); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
+				return
+			}
+			
+			if err := encoderInstance.SetUseNVENC(req.Enabled); err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+				return
+			}
+			
+			c.JSON(http.StatusOK, gin.H{
+				"status": "updated",
+				"nvenc_enabled": req.Enabled,
+			})
+		})
+
 		// Settings
 		api.GET("/settings", getSettings(db))
 		api.PUT("/settings", updateSettings(db))

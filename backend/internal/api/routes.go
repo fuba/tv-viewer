@@ -2,8 +2,9 @@ package api
 
 import (
 	"database/sql"
-	"io"
+	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -43,6 +44,33 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 			})
 		})
 
+		// Get active encoding sessions
+		api.GET("/sessions", func(c *gin.Context) {
+			sessions := encoderInstance.GetActiveSessions()
+			c.JSON(http.StatusOK, gin.H{
+				"active_sessions": sessions,
+				"count": len(sessions),
+			})
+		})
+
+		// Stop all encoding sessions
+		api.POST("/sessions/stop-all", func(c *gin.Context) {
+			encoderInstance.StopAllSessions()
+			c.JSON(http.StatusOK, gin.H{
+				"status": "stopped",
+			})
+		})
+
+		// Get FFmpeg logs for a channel
+		api.GET("/logs/:channel", func(c *gin.Context) {
+			channelID := c.Param("channel")
+			logs := encoderInstance.GetChannelLogs(channelID)
+			c.JSON(http.StatusOK, gin.H{
+				"channel": channelID,
+				"logs": logs,
+			})
+		})
+
 		// Settings
 		api.GET("/settings", getSettings(db))
 		api.PUT("/settings", updateSettings(db))
@@ -60,8 +88,13 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 		api.GET("/stream/:channel/:segment", getSegment(db))
 	}
 
-	// Static files
-	router.Static("/", "./frontend/dist")
+	// Health check for root
+	router.GET("/", func(c *gin.Context) {
+		c.JSON(http.StatusOK, gin.H{
+			"message": "TV Viewer API Server",
+			"version": "1.0.0",
+		})
+	})
 }
 
 func getSettings(db *sql.DB) gin.HandlerFunc {
@@ -104,28 +137,66 @@ func getChannels(db *sql.DB) gin.HandlerFunc {
 
 func streamChannel(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		channelID := c.Param("id")
+		channelID, err := url.QueryUnescape(c.Param("id"))
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{
+				"error": "Invalid channel ID encoding",
+			})
+			return
+		}
 		
 		mirakurunURL := os.Getenv("MIRAKURUN_URL")
 		if mirakurunURL == "" {
 			mirakurunURL = "http://tuner:40772"
 		}
 		
+		// First, get channel info to determine type
 		client := mirakurun.NewClient(mirakurunURL)
-		stream, err := client.GetChannelStream(channelID)
+		channels, err := client.GetChannels()
 		if err != nil {
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to get channel stream",
+				"error": "Failed to get channels",
 			})
 			return
 		}
-		defer stream.Close()
+		
+		// Find the channel type
+		var channelType string
+		for _, ch := range channels {
+			if ch.Channel == channelID {
+				channelType = ch.Type
+				break
+			}
+		}
+		
+		if channelType == "" {
+			log.Printf("Channel %s not found in channels list", channelID)
+			c.JSON(http.StatusNotFound, gin.H{
+				"error": "Channel not found",
+			})
+			return
+		}
+		
+		log.Printf("Streaming channel %s with type %s", channelID, channelType)
+		stream, err := client.GetChannelStreamWithType(channelType, channelID)
+		if err != nil {
+			log.Printf("Failed to get stream for channel %s (type %s): %v", channelID, channelType, err)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to get channel stream",
+				"details": err.Error(),
+			})
+			return
+		}
+		// Note: Do NOT defer stream.Close() here as the encoder needs to manage the stream
 		
 		// Start encoding
 		session, err := encoderInstance.StartEncoding(channelID, stream)
 		if err != nil {
+			stream.Close() // Only close on error
+			log.Printf("Failed to start encoding for channel %s: %v", channelID, err)
 			c.JSON(http.StatusInternalServerError, gin.H{
 				"error": "Failed to start encoding",
+				"details": err.Error(),
 			})
 			return
 		}
@@ -176,11 +247,17 @@ func getPrograms(db *sql.DB) gin.HandlerFunc {
 
 func getPlaylist(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		channelID := c.Param("channel")
+		channelID, err := url.QueryUnescape(c.Param("channel"))
+		if err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
 		playlistPath := encoderInstance.GetPlaylistPath(channelID)
+		log.Printf("Looking for playlist at: %s", playlistPath)
 		
 		// Check if playlist exists
 		if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
+			log.Printf("Playlist not found: %s (error: %v)", playlistPath, err)
 			c.Status(http.StatusNotFound)
 			return
 		}
@@ -191,7 +268,11 @@ func getPlaylist(db *sql.DB) gin.HandlerFunc {
 
 func getSubtitles(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		channelID := c.Param("channel")
+		channelID, err := url.QueryUnescape(c.Param("channel"))
+		if err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
 		subtitlePath := encoderInstance.GetSubtitlePath(channelID)
 		
 		// Check if subtitle file exists
@@ -208,17 +289,27 @@ func getSubtitles(db *sql.DB) gin.HandlerFunc {
 
 func getSegment(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		channelID := c.Param("channel")
+		channelID, err := url.QueryUnescape(c.Param("channel"))
+		if err != nil {
+			c.Status(http.StatusBadRequest)
+			return
+		}
 		segment := c.Param("segment")
 		
 		segmentPath := filepath.Join("stream", channelID, segment)
 		
+		// Debug: log the requested path
+		log.Printf("Serving segment: %s (channel: %s, segment: %s)", segmentPath, channelID, segment)
+		
 		// Check if segment exists
 		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
+			log.Printf("Segment not found: %s", segmentPath)
 			c.Status(http.StatusNotFound)
 			return
 		}
 		
+		// Set proper content type for TS files
+		c.Header("Content-Type", "video/mp2t")
 		c.File(segmentPath)
 	}
 }

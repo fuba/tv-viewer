@@ -4,29 +4,26 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "8080:8080"
+      - "8081:8080"
     environment:
-      - PORT=8080
-      - MIRAKURUN_URL=http://tuner:40772
+      - PORT=8082
+      - MIRAKURUN_URL=http://localhost:40772
     volumes:
       - ./data:/app/data
-      - ./stream:/app/stream
-      - /usr/bin/ffmpeg:/usr/bin/ffmpeg:ro
+      - stream_data:/app/stream
     restart: unless-stopped
-    networks:
-      - tv-viewer-net
+    network_mode: host
 
   frontend:
     build:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3000:80"
+      - "3001:80"
     depends_on:
       - backend
     restart: unless-stopped
-    networks:
-      - tv-viewer-net
+    network_mode: host
 
 networks:
   tv-viewer-net:
@@ -34,4 +31,4 @@ networks:
 
 volumes:
   data:
-  stream:
+  stream_data:

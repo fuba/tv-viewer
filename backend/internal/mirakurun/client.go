@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"time"
 )
@@ -109,11 +110,31 @@ func (c *Client) GetServiceStream(serviceID int) (io.ReadCloser, error) {
 }
 
 func (c *Client) GetChannelStream(channelID string) (io.ReadCloser, error) {
-	url := fmt.Sprintf("%s/api/channels/%s/stream", c.baseURL, channelID)
-	resp, err := c.httpClient.Get(url)
+	// Default to GR for backward compatibility
+	return c.GetChannelStreamWithType("GR", channelID)
+}
+
+func (c *Client) GetChannelStreamWithType(channelType, channelID string) (io.ReadCloser, error) {
+	url := fmt.Sprintf("%s/api/channels/%s/%s/stream", c.baseURL, channelType, channelID)
+	log.Printf("Requesting stream from Mirakurun: %s", url)
+	
+	// Create request with longer timeout for streaming
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
+	
+	// Use a client with no timeout for streaming
+	streamClient := &http.Client{
+		Timeout: 0, // No timeout for streaming
+	}
+	
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		log.Printf("Failed to connect to Mirakurun stream: %v", err)
+		return nil, err
+	}
+	log.Printf("Mirakurun stream response: Status=%d, ContentLength=%d", resp.StatusCode, resp.ContentLength)
 
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()

@@ -66,7 +66,7 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 
 2. **NVENC状態確認**
 ```bash
-curl http://localhost:8082/api/nvenc/status
+curl http://localhost:18088/api/nvenc/status
 ```
 
 ## トラブルシューティング

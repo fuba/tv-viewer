@@ -53,7 +53,7 @@ services:
 **効果**: Mirakurunとの通信レイテンシーが大幅改善
 
 #### ポート設定の整理
-- Backend: `localhost:8082`
+- Backend: `localhost:18088`
 - Frontend: `localhost:3001` 
 - Mirakurun: `localhost:40772`
 
@@ -352,7 +352,7 @@ hls = new Hls({
 ### 測定例
 ```bash
 # チャンネル切り替え時間測定
-time curl -s http://localhost:8082/api/channels/16/stream
+time curl -s http://localhost:18088/api/channels/16/stream
 # 結果: 約1.3秒（FFmpeg起動 + 初期解析）
 
 # セグメント生成間隔

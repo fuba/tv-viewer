@@ -48,7 +48,7 @@ open http://localhost:3001
 
 ```bash
 # NVENC ステータス確認
-curl http://localhost:8082/api/nvenc/status
+curl http://localhost:18088/api/nvenc/status
 
 # 期待される出力:
 # {
@@ -112,7 +112,7 @@ docker stats tv-viewer-backend-1
 docker logs tv-viewer-backend-1 | grep -i nvenc
 
 # FFmpeg エンコーディングログ
-curl http://localhost:8082/api/logs/20
+curl http://localhost:18088/api/logs/20
 ```
 
 ## 6. トラブルシューティング

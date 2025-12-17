@@ -5,9 +5,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile.dev
     ports:
-      - "8080:8080"
+      - "18088:18088"
     environment:
-      - PORT=8080
+      - PORT=18088
       - MIRAKURUN_URL=http://tuner:40772
       - GIN_MODE=debug
     volumes:

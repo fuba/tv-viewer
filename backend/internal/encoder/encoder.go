@@ -34,7 +34,7 @@ type Session struct {
 func New() *Encoder {
 	e := &Encoder{
 		sessions:      make(map[string]*Session),
-		maxConcurrent: 1, // Limit to 1 concurrent encoding for now
+		maxConcurrent: 3, // Allow 3 concurrent encodings for CS channel testing
 		logs:          make(map[string][]string),
 	}
 	
@@ -59,13 +59,7 @@ func (e *Encoder) StartEncoding(channelID string, input io.ReadCloser) (*Session
 	// Check if this is a CS channel (simple heuristic)
 	isCSChannel := strings.HasPrefix(channelID, "CS")
 	
-	// Temporarily disable CS channels due to segmentation faults
-	if isCSChannel {
-		log.Printf("CS channel %s is currently not supported due to encoding issues", channelID)
-		input.Close()
-		return nil, fmt.Errorf("CS channels are temporarily unavailable")
-	}
-	
+	log.Printf("Starting encoding for channel %s (CS: %v)", channelID, isCSChannel)
 	return e.startEncodingWithType(channelID, input, isCSChannel)
 }
 
@@ -77,15 +71,23 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 	
 	// Check if we're at max capacity
 	if len(e.sessions) >= e.maxConcurrent {
-		log.Printf("Maximum concurrent encodings (%d) reached. Stopping all existing sessions.", e.maxConcurrent)
-		// Stop all existing sessions when at capacity
+		log.Printf("Maximum concurrent encodings (%d) reached. Finding oldest session to stop.", e.maxConcurrent)
+		// Find the oldest session to stop (simple FIFO)
+		var oldestChannelID string
+		var oldestSession *Session
 		for cid, session := range e.sessions {
-			log.Printf("Stopping session for channel %s to make room", cid)
-			e.stopSession(session)
-			delete(e.sessions, cid)
+			if oldestSession == nil || oldestChannelID > cid { // Simple string comparison for FIFO-like behavior
+				oldestChannelID = cid
+				oldestSession = session
+			}
 		}
-		// Wait for cleanup
-		time.Sleep(1 * time.Second)
+		if oldestSession != nil {
+			log.Printf("Stopping oldest session for channel %s to make room", oldestChannelID)
+			e.stopSession(oldestSession)
+			delete(e.sessions, oldestChannelID)
+			// Wait for cleanup
+			time.Sleep(500 * time.Millisecond)
+		}
 	}
 	
 	// Stop existing session for this channel
@@ -151,30 +153,45 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 	var cmd *exec.Cmd
 	
 	if isCSChannel {
-		// Special handling for CS channels - select first program
+		// CS channel configuration - fast start with minimal analysis
 		cmd = exec.CommandContext(ctx,
 			ffmpegPath,
-			// Input configuration for CS channels
+			// Input configuration for CS channels - optimized for speed
 			"-f", "mpegts",
-			"-analyzeduration", "10000000",
-			"-probesize", "10000000",
+			"-fflags", "+genpts+discardcorrupt", // Basic flags for CS streams
+			"-analyzeduration", "500000", // Minimal analysis (0.5 second)
+			"-probesize", "32768", // Minimal probe for immediate startup
+			"-avoid_negative_ts", "make_zero",
+			"-thread_queue_size", "512", // Moderate queue size
 			"-i", "pipe:0",
 			"-y",
-			// Select first program's streams
-			"-map", "0:1", "-map", "0:2",
+			// Use simple stream mapping - take whatever is first available
+			"-map", "0:v:0?", // Map first video stream (optional to prevent failures)
+			"-map", "0:a:0?", // Map first audio stream (optional to prevent failures)
 		)
 		// Add video codec args based on NVENC availability
 		quality := GetEncodingQuality()
 		cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, quality)...)
 		cmd.Args = append(cmd.Args,
+			"-r", "30",
+			"-g", "30", // Normal GOP size
+			"-keyint_min", "30",
+			"-sc_threshold", "0",
+			// Audio encoding - simple settings
 			"-c:a", "aac",
 			"-b:a", "128k",
-			// HLS output
+			"-ac", "2",
+			"-ar", "48000",
+			// HLS output - fast generation
 			"-f", "hls",
-			"-hls_time", "4",
-			"-hls_list_size", "10",
-			"-hls_flags", "delete_segments+round_durations",
-			"-hls_segment_filename", filepath.Join(outputDir, "segment%03d.ts"),
+			"-hls_time", "2", // Shorter segments for faster startup
+			"-hls_list_size", "5", // Moderate playlist size
+			"-hls_flags", "delete_segments+round_durations+independent_segments",
+			"-hls_allow_cache", "0",
+			"-hls_start_number_source", "epoch",
+			"-hls_init_time", "0.5", // Quick start
+			"-force_key_frames", "expr:gte(t,n_forced*1)", // Force keyframes every 1 second
+			"-hls_segment_filename", filepath.Join(outputDir, "segment%010d.ts"),
 			filepath.Join(outputDir, "playlist.m3u8"),
 		)
 	} else {

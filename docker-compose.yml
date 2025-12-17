@@ -4,9 +4,9 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     ports:
-      - "8081:8080"
+      - "18088:18088"
     environment:
-      - PORT=8082
+      - PORT=18088
       - MIRAKURUN_URL=http://localhost:40772
     volumes:
       - ./data:/app/data

@@ -4,15 +4,19 @@
   import SubtitleRenderer from './SubtitleRenderer.svelte'
   
   export let selectedChannel: any
-  export let showDebug: boolean = false
+  
+  // Export logs for external display
+  export let debugLogs: string[] = []
+  export let ffmpegLogs: string[] = []
+  
+  // showDebug passed from parent but not used in this component
   
   let videoElement: HTMLVideoElement
   let hls: Hls | null = null
   let streamStarted = false
-  let debugLogs: string[] = []
   let currentChannel: any = null
   let isStartingStream = false
-  let ffmpegLogs: string[] = []
+  let hasUserInteracted = false
   
   function addLog(message: string, type: 'info' | 'error' | 'success' = 'info') {
     const timestamp = new Date().toLocaleTimeString()
@@ -247,85 +251,43 @@
       hls.destroy()
     }
   })
+  
+  function handleVideoClick() {
+    if (videoElement && !hasUserInteracted) {
+      hasUserInteracted = true
+      videoElement.muted = false
+      addLog('Audio enabled after user interaction')
+    }
+  }
 </script>
 
-<div class="space-y-4">
-  <div class="bg-black rounded-lg overflow-hidden aspect-video relative">
-    {#if selectedChannel}
-      <video
-        bind:this={videoElement}
-        class="w-full h-full"
-        controls
-        autoplay
-      >
-      </video>
-      {#if streamStarted}
-        <SubtitleRenderer
-          subtitleUrl={`/api/stream/${selectedChannel.channel || selectedChannel.id}/subtitles.ass`}
-          {videoElement}
-        />
-      {/if}
-    {:else}
-      <div class="flex items-center justify-center h-full text-gray-500">
-        <p class="text-xl">チャンネルを選択してください</p>
-      </div>
+<div class="bg-black rounded-lg overflow-hidden aspect-video relative">
+  {#if selectedChannel}
+    <video
+      bind:this={videoElement}
+      class="w-full h-full"
+      controls
+      autoplay
+      playsinline
+      webkit-playsinline
+      muted
+      on:click={handleVideoClick}
+      on:play={() => {
+        if (!hasUserInteracted && videoElement) {
+          addLog('Video playing (muted for autoplay)')
+        }
+      }}
+    >
+    </video>
+    {#if streamStarted}
+      <SubtitleRenderer
+        subtitleUrl={`/api/stream/${selectedChannel.channel || selectedChannel.id}/subtitles.ass`}
+        {videoElement}
+      />
     {/if}
-  </div>
-
-  {#if showDebug}
-    <div class="bg-gray-900 rounded-lg p-4 space-y-4">
-      <!-- Application Debug Logs -->
-      <div>
-        <div class="flex justify-between items-center mb-2">
-          <h3 class="text-lg font-semibold text-white">アプリケーションログ</h3>
-          <button 
-            class="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700"
-            on:click={() => debugLogs = []}
-          >
-            クリア
-          </button>
-        </div>
-        <div class="bg-black rounded p-3 h-64 overflow-y-auto">
-          {#if debugLogs.length === 0}
-            <p class="text-gray-400 text-sm">ログはありません</p>
-          {:else}
-            {#each debugLogs as log}
-              <div class="text-xs font-mono mb-1 text-green-400">
-                {log}
-              </div>
-            {/each}
-          {/if}
-        </div>
-      </div>
-      
-      <!-- FFmpeg Logs -->
-      <div>
-        <div class="flex justify-between items-center mb-2">
-          <h3 class="text-lg font-semibold text-white">FFmpegログ</h3>
-          <button 
-            class="px-3 py-1 bg-red-600 text-white rounded text-sm hover:bg-red-700"
-            on:click={() => ffmpegLogs = []}
-          >
-            クリア
-          </button>
-        </div>
-        <div class="bg-black rounded p-3 h-64 overflow-y-auto">
-          {#if ffmpegLogs.length === 0}
-            <p class="text-gray-400 text-sm">FFmpegログはありません</p>
-          {:else}
-            {#each ffmpegLogs as log}
-              <div class="text-xs font-mono mb-1 text-yellow-400 whitespace-pre-wrap">
-                {log}
-              </div>
-            {/each}
-          {/if}
-        </div>
-      </div>
-      
-      <div class="text-xs text-gray-400">
-        チャンネル: {selectedChannel?.name || 'なし'} | 
-        ストリーミング状態: {streamStarted ? '再生中' : '待機中'}
-      </div>
+  {:else}
+    <div class="flex items-center justify-center h-full text-gray-500">
+      <p class="text-xl">チャンネルを選択してください</p>
     </div>
   {/if}
 </div>

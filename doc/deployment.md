@@ -39,7 +39,7 @@ docker compose up -d
 
 ### 4. Verify Installation
 
-- Backend API: http://localhost:8080/api/health
+- Backend API: http://localhost:18088/api/health
 - Frontend UI: http://localhost:3000
 
 ## Configuration
@@ -54,7 +54,7 @@ MIRAKURUN_URL=http://your-mirakurun-server:40772
 
 ### Ports
 
-- Backend API: 8080 (configurable via PORT env)
+- Backend API: 18088 (configurable via PORT env)
 - Frontend UI: 3000
 
 ### Storage
@@ -78,7 +78,7 @@ make logs-frontend
 ### Health Check
 
 ```bash
-curl http://localhost:8080/api/health
+curl http://localhost:18088/api/health
 ```
 
 ## Troubleshooting

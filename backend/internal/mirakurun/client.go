@@ -23,7 +23,7 @@ type Channel struct {
 }
 
 type Service struct {
-	ID       int    `json:"id"`
+	ID       int64  `json:"id"`
 	ServiceID int   `json:"serviceId"`
 	NetworkID int   `json:"networkId"`
 	Name     string `json:"name"`
@@ -86,20 +86,54 @@ func (c *Client) GetPrograms(serviceID int) ([]Program, error) {
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
-	var programs []Program
-	if err := json.NewDecoder(resp.Body).Decode(&programs); err != nil {
+	var allPrograms []Program
+	if err := json.NewDecoder(resp.Body).Decode(&allPrograms); err != nil {
 		return nil, err
+	}
+
+	// Filter programs to include only current and future programs
+	now := time.Now().UnixMilli()
+	var programs []Program
+	for _, p := range allPrograms {
+		// Include programs that are currently airing or will air in the future
+		if p.StartAt + int64(p.Duration) > now {
+			programs = append(programs, p)
+		}
+	}
+	
+	// Sort programs by start time
+	for i := 0; i < len(programs)-1; i++ {
+		for j := i + 1; j < len(programs); j++ {
+			if programs[i].StartAt > programs[j].StartAt {
+				programs[i], programs[j] = programs[j], programs[i]
+			}
+		}
 	}
 
 	return programs, nil
 }
 
-func (c *Client) GetServiceStream(serviceID int) (io.ReadCloser, error) {
+func (c *Client) GetServiceStream(serviceID int64) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/api/services/%d/stream", c.baseURL, serviceID)
-	resp, err := c.httpClient.Get(url)
+	log.Printf("Requesting service stream from Mirakurun: %s", url)
+	
+	// Create request with no timeout for streaming
+	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
+	
+	// Use a client with no timeout for streaming
+	streamClient := &http.Client{
+		Timeout: 0, // No timeout for streaming
+	}
+	
+	resp, err := streamClient.Do(req)
+	if err != nil {
+		log.Printf("Failed to connect to Mirakurun service stream: %v", err)
+		return nil, err
+	}
+	log.Printf("Mirakurun service stream response: Status=%d, ContentLength=%d", resp.StatusCode, resp.ContentLength)
 
 	if resp.StatusCode != http.StatusOK {
 		resp.Body.Close()

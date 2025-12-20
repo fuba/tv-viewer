@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -23,12 +24,16 @@ type Encoder struct {
 }
 
 type Session struct {
-	ID        string
-	ChannelID string
-	cmd       *exec.Cmd
-	cancel    context.CancelFunc
-	outputDir string
-	stream    io.ReadCloser
+	ID            string
+	ChannelID     string
+	cmd           *exec.Cmd
+	cancel        context.CancelFunc
+	outputDir     string
+	stream        io.ReadCloser
+	StreamURL     string // URL of the source stream
+	VideoStreamIndex int  // Selected video stream index (-1 for auto)
+	AudioStreamIndex int  // Selected audio stream index (-1 for auto)
+	StreamInfo    *StreamInfo // Cached stream information
 }
 
 func New() *Encoder {
@@ -63,8 +68,20 @@ func (e *Encoder) StartEncoding(channelID string, input io.ReadCloser) (*Session
 	return e.startEncodingWithType(channelID, input, isCSChannel)
 }
 
+// StartEncodingWithStreamSelection starts encoding with specific stream selection
+func (e *Encoder) StartEncodingWithStreamSelection(channelID string, input io.ReadCloser, streamURL string, videoIndex, audioIndex int) (*Session, error) {
+	isCSChannel := strings.HasPrefix(channelID, "CS")
+	log.Printf("Starting encoding for channel %s with stream selection (video: %d, audio: %d)", channelID, videoIndex, audioIndex)
+	return e.startEncodingWithTypeAndStreams(channelID, input, streamURL, isCSChannel, videoIndex, audioIndex)
+}
+
 func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, isCSChannel bool) (*Session, error) {
-	log.Printf("Starting encoding for channel %s (isCS: %v)", channelID, isCSChannel)
+	// Default to automatic stream selection
+	return e.startEncodingWithTypeAndStreams(channelID, input, "", isCSChannel, -1, -1)
+}
+
+func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.ReadCloser, streamURL string, isCSChannel bool, videoStreamIndex, audioStreamIndex int) (*Session, error) {
+	log.Printf("Starting encoding for channel %s (isCS: %v, video: %d, audio: %d)", channelID, isCSChannel, videoStreamIndex, audioStreamIndex)
 	
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -153,44 +170,30 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 	var cmd *exec.Cmd
 	
 	if isCSChannel {
-		// CS channel configuration - fast start with minimal analysis
+		// CS channel configuration - experimental copy mode for problematic channels
 		cmd = exec.CommandContext(ctx,
 			ffmpegPath,
-			// Input configuration for CS channels - optimized for speed
+			// Input configuration for CS channels - minimal processing
 			"-f", "mpegts",
-			"-fflags", "+genpts+discardcorrupt", // Basic flags for CS streams
-			"-analyzeduration", "500000", // Minimal analysis (0.5 second)
-			"-probesize", "32768", // Minimal probe for immediate startup
+			"-fflags", "+genpts+discardcorrupt+igndts+ignidx", 
+			"-analyzeduration", "10000000", // Reasonable analysis time
+			"-probesize", "5000000", // Reasonable probe size
 			"-avoid_negative_ts", "make_zero",
-			"-thread_queue_size", "512", // Moderate queue size
+			"-thread_queue_size", "1024",
+			"-err_detect", "ignore_err", 
+			"-max_streams", "50", 
 			"-i", "pipe:0",
 			"-y",
-			// Use simple stream mapping - take whatever is first available
-			"-map", "0:v:0?", // Map first video stream (optional to prevent failures)
-			"-map", "0:a:0?", // Map first audio stream (optional to prevent failures)
-		)
-		// Add video codec args based on NVENC availability
-		quality := GetEncodingQuality()
-		cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, quality)...)
-		cmd.Args = append(cmd.Args,
-			"-r", "30",
-			"-g", "30", // Normal GOP size
-			"-keyint_min", "30",
-			"-sc_threshold", "0",
-			// Audio encoding - simple settings
-			"-c:a", "aac",
-			"-b:a", "128k",
-			"-ac", "2",
-			"-ar", "48000",
-			// HLS output - fast generation
+			// Try copy mode first to avoid decoding issues
+			"-c", "copy", // Copy all streams without re-encoding
+			// HLS output - minimal processing
 			"-f", "hls",
-			"-hls_time", "2", // Shorter segments for faster startup
-			"-hls_list_size", "5", // Moderate playlist size
+			"-hls_time", "6", // Longer segments for copy mode
+			"-hls_list_size", "6",
 			"-hls_flags", "delete_segments+round_durations+independent_segments",
 			"-hls_allow_cache", "0",
 			"-hls_start_number_source", "epoch",
-			"-hls_init_time", "0.5", // Quick start
-			"-force_key_frames", "expr:gte(t,n_forced*1)", // Force keyframes every 1 second
+			"-hls_init_time", "3.0",
 			"-hls_segment_filename", filepath.Join(outputDir, "segment%010d.ts"),
 			filepath.Join(outputDir, "playlist.m3u8"),
 		)
@@ -202,18 +205,29 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 			// BS channel configuration - explicit stream mapping
 			cmd = exec.CommandContext(ctx,
 				ffmpegPath,
-				// Input configuration for BS channels
+				// Input configuration for BS channels with error resilience
 				"-f", "mpegts",
-				"-fflags", "+genpts+discardcorrupt", 
+				"-fflags", "+genpts+discardcorrupt+igndts+ignidx", // Enhanced error handling
 				"-analyzeduration", "10000000", // Much longer analysis for BS complex streams
 				"-probesize", "5000000", // Much larger probe for BS multi-program streams
 				"-avoid_negative_ts", "make_zero",
 				"-thread_queue_size", "1024", // Larger queue for BS multi-program streams
+				"-err_detect", "ignore_err", // Ignore minor errors
 				"-i", "pipe:0",
 				"-y",
-				// Use automatic stream selection for BS channels with fallback
-				"-map", "0:v:0", // Map first video stream (remove ? to make it required)
-				"-map", "0:a:0", // Map first audio stream (remove ? to make it required)
+			)
+			// Stream mapping based on selection
+			if videoStreamIndex >= 0 {
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:v:%d", videoStreamIndex))
+			} else {
+				cmd.Args = append(cmd.Args, "-map", "0:v:0") // Map first video stream
+			}
+			if audioStreamIndex >= 0 {
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:a:%d", audioStreamIndex))
+			} else {
+				cmd.Args = append(cmd.Args, "-map", "0:a:0") // Map first audio stream
+			}
+			cmd.Args = append(cmd.Args,
 			)
 			// Add video codec args based on NVENC availability
 			quality := GetEncodingQuality()
@@ -244,18 +258,29 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 			// Standard configuration for other channels (GR)
 			cmd = exec.CommandContext(ctx,
 				ffmpegPath,
-				// Input configuration
+				// Input configuration with enhanced error resilience
 				"-f", "mpegts", // Specify input format as MPEG2-TS
-				"-fflags", "+genpts+discardcorrupt", // Generate PTS, discard corrupt
+				"-fflags", "+genpts+discardcorrupt+igndts+ignidx", // Enhanced error handling
 				"-analyzeduration", "5000000", // Increased analysis time - 5 seconds
 				"-probesize", "2000000", // Increased probe size for better stream detection
 				"-avoid_negative_ts", "make_zero", // Handle negative timestamps
 				"-thread_queue_size", "512", // Increase input thread queue size
+				"-err_detect", "ignore_err", // Ignore minor errors
 				"-i", "pipe:0", // Input from pipe
 				"-y", // Overwrite output files
-				// Stream selection - more robust mapping
-				"-map", "0:v:0", // Map first video stream (remove ? to make it required)
-				"-map", "0:a:0", // Map first audio stream (remove ? to make it required)
+			)
+			// Stream mapping based on selection
+			if videoStreamIndex >= 0 {
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:v:%d", videoStreamIndex))
+			} else {
+				cmd.Args = append(cmd.Args, "-map", "0:v:0") // Map first video stream
+			}
+			if audioStreamIndex >= 0 {
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:a:%d", audioStreamIndex))
+			} else {
+				cmd.Args = append(cmd.Args, "-map", "0:a:0") // Map first audio stream
+			}
+			cmd.Args = append(cmd.Args,
 			)
 			// Add video codec args based on NVENC availability
 			quality := GetEncodingQuality()
@@ -297,7 +322,7 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 		return nil, err
 	}
 	
-	// Handle stderr in a non-blocking goroutine
+	// Handle stderr in a non-blocking goroutine with real-time stream info parsing
 	go func() {
 		defer stderrPipe.Close()
 		buf := make([]byte, 4096)
@@ -313,7 +338,7 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 				logMsg := string(buf[:n])
 				log.Printf("FFmpeg [%s]: %s", channelID, logMsg)
 				
-				// Store in memory logs (use a separate goroutine to avoid mutex deadlock)
+				// Store in memory logs and parse stream info in real-time
 				go func(msg string) {
 					e.mu.Lock()
 					defer e.mu.Unlock()
@@ -325,18 +350,95 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 					if len(e.logs[channelID]) > 1000 {
 						e.logs[channelID] = e.logs[channelID][len(e.logs[channelID])-1000:]
 					}
+					
+					// Parse stream info in real-time if session exists and no stream info yet
+					if session, exists := e.sessions[channelID]; exists && session.StreamInfo == nil {
+						// Look for stream detection patterns in the log message
+						if strings.Contains(msg, "Stream #") {
+							// Parse all accumulated logs to build stream info
+							parsedInfo := ParseStreamInfoFromLogs(e.logs[channelID])
+							if len(parsedInfo.VideoStreams) > 0 || len(parsedInfo.AudioStreams) > 0 {
+								// Convert to StreamInfo format
+								streamInfo := &StreamInfo{
+									Streams: make([]Stream, 0),
+									Format: Format{
+										FormatName: "mpegts",
+										FormatLongName: "MPEG-2 Transport Stream",
+									},
+								}
+								
+								// Add video streams
+								for _, vs := range parsedInfo.VideoStreams {
+									stream := Stream{
+										Index:         vs.Index,
+										CodecName:     vs.Codec,
+										CodecLongName: vs.Codec,
+										CodecType:     "video",
+										BitRate:       vs.Bitrate,
+									}
+									if vs.Resolution != "" {
+										parts := strings.Split(vs.Resolution, "x")
+										if len(parts) == 2 {
+											if width, err := strconv.Atoi(parts[0]); err == nil {
+												stream.Width = width
+											}
+											if height, err := strconv.Atoi(parts[1]); err == nil {
+												stream.Height = height
+											}
+										}
+									}
+									if vs.Language != "" {
+										if stream.Tags == nil {
+											stream.Tags = make(map[string]string)
+										}
+										stream.Tags["language"] = vs.Language
+									}
+									streamInfo.Streams = append(streamInfo.Streams, stream)
+								}
+								
+								// Add audio streams
+								for _, as := range parsedInfo.AudioStreams {
+									stream := Stream{
+										Index:         as.Index,
+										CodecName:     as.Codec,
+										CodecLongName: as.Codec,
+										CodecType:     "audio",
+										BitRate:       as.Bitrate,
+										SampleRate:    strings.TrimSuffix(as.SampleRate, " Hz"),
+										ChannelLayout: as.Channels,
+									}
+									if as.Language != "" {
+										if stream.Tags == nil {
+											stream.Tags = make(map[string]string)
+										}
+										stream.Tags["language"] = as.Language
+									}
+									streamInfo.Streams = append(streamInfo.Streams, stream)
+								}
+								
+								// Update session with stream info
+								session.StreamInfo = streamInfo
+								log.Printf("Channel %s: Detected %d video streams, %d audio streams", 
+									channelID, len(parsedInfo.VideoStreams), len(parsedInfo.AudioStreams))
+							}
+						}
+					}
 				}(logMsg)
 			}
 		}
 	}()
 	
 	session := &Session{
-		ID:        sessionID,
-		ChannelID: channelID,
-		cmd:       cmd,
-		cancel:    cancel,
-		outputDir: outputDir,
-		stream:    input,
+		ID:               sessionID,
+		ChannelID:        channelID,
+		cmd:              cmd,
+		cancel:           cancel,
+		outputDir:        outputDir,
+		stream:           input,
+		StreamURL:        streamURL,
+		VideoStreamIndex: videoStreamIndex,
+		AudioStreamIndex: audioStreamIndex,
+		StreamInfo:       nil, // Will be populated from FFmpeg logs
 	}
 	
 	// Initialize logs for this channel before starting (mutex already held)
@@ -350,11 +452,18 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 	
 	log.Printf("FFmpeg process started for channel %s with PID %d", channelID, cmd.Process.Pid)
 	
-	// Copy input stream to FFmpeg stdin in a separate goroutine with improved buffering
+	// Copy input stream to FFmpeg stdin with MPEG-TS filtering
 	go func() {
 		defer func() {
 			stdinPipe.Close()
 			log.Printf("Input stream reader for channel %s stopped", channelID)
+		}()
+		
+		// Create filtered reader to remove problematic MPEG-TS packets
+		filteredInput := NewFilteredReader(input)
+		defer func() {
+			filteredInput.LogStats(channelID)
+			filteredInput.Close()
 		}()
 		
 		buf := make([]byte, 188*1024) // Use TS packet aligned buffer (188 bytes * 1024)
@@ -366,12 +475,12 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 				log.Printf("Context cancelled for channel %s", channelID)
 				return
 			default:
-				n, err := input.Read(buf)
+				n, err := filteredInput.Read(buf)
 				if err != nil {
 					if err != io.EOF {
-						log.Printf("Error reading from input stream for channel %s after %d bytes: %v", channelID, totalBytes, err)
+						log.Printf("Error reading from filtered stream for channel %s after %d bytes: %v", channelID, totalBytes, err)
 					} else {
-						log.Printf("Input stream EOF for channel %s after %d bytes", channelID, totalBytes)
+						log.Printf("Filtered stream EOF for channel %s after %d bytes", channelID, totalBytes)
 					}
 					return
 				}
@@ -555,4 +664,123 @@ func (e *Encoder) SetUseNVENC(use bool) error {
 	e.useNVENC = use
 	log.Printf("NVENC usage set to: %v", use)
 	return nil
+}
+
+// GetSessionInfo returns information about a specific session including stream info
+func (e *Encoder) GetSessionInfo(channelID string) (map[string]interface{}, error) {
+	e.mu.Lock()
+	session, exists := e.sessions[channelID]
+	logs := make([]string, 0)
+	if exists {
+		if sessionLogs, logExists := e.logs[channelID]; logExists {
+			logs = make([]string, len(sessionLogs))
+			copy(logs, sessionLogs)
+		}
+	}
+	e.mu.Unlock()
+	
+	if !exists {
+		return nil, fmt.Errorf("no active session for channel %s", channelID)
+	}
+	
+	info := map[string]interface{}{
+		"channel_id": session.ChannelID,
+		"session_id": session.ID,
+		"stream_url": session.StreamURL,
+		"video_stream_index": session.VideoStreamIndex,
+		"audio_stream_index": session.AudioStreamIndex,
+	}
+	
+	// Parse stream info from FFmpeg logs if not already cached
+	if session.StreamInfo == nil && len(logs) > 0 {
+		parsedInfo := ParseStreamInfoFromLogs(logs)
+		if len(parsedInfo.VideoStreams) > 0 || len(parsedInfo.AudioStreams) > 0 {
+			// Convert parsed info to StreamInfo format
+			streamInfo := &StreamInfo{
+				Streams: make([]Stream, 0),
+			}
+			
+			// Add video streams
+			for _, vs := range parsedInfo.VideoStreams {
+				stream := Stream{
+					Index:         vs.Index,
+					CodecName:     vs.Codec,
+					CodecLongName: vs.Codec,
+					CodecType:     "video",
+					BitRate:       vs.Bitrate,
+				}
+				if vs.Resolution != "" {
+					// Parse resolution (e.g., "1920x1080")
+					parts := strings.Split(vs.Resolution, "x")
+					if len(parts) == 2 {
+						if width, err := strconv.Atoi(parts[0]); err == nil {
+							stream.Width = width
+						}
+						if height, err := strconv.Atoi(parts[1]); err == nil {
+							stream.Height = height
+						}
+					}
+				}
+				if vs.Language != "" {
+					if stream.Tags == nil {
+						stream.Tags = make(map[string]string)
+					}
+					stream.Tags["language"] = vs.Language
+				}
+				streamInfo.Streams = append(streamInfo.Streams, stream)
+			}
+			
+			// Add audio streams
+			for _, as := range parsedInfo.AudioStreams {
+				stream := Stream{
+					Index:         as.Index,
+					CodecName:     as.Codec,
+					CodecLongName: as.Codec,
+					CodecType:     "audio",
+					BitRate:       as.Bitrate,
+					SampleRate:    strings.TrimSuffix(as.SampleRate, " Hz"),
+					ChannelLayout: as.Channels,
+				}
+				if as.Language != "" {
+					if stream.Tags == nil {
+						stream.Tags = make(map[string]string)
+					}
+					stream.Tags["language"] = as.Language
+				}
+				streamInfo.Streams = append(streamInfo.Streams, stream)
+			}
+			
+			session.StreamInfo = streamInfo
+		}
+	}
+	
+	if session.StreamInfo != nil {
+		info["stream_info"] = session.StreamInfo
+	}
+	
+	return info, nil
+}
+
+// UpdateStreamSelection updates the stream selection for an active session
+func (e *Encoder) UpdateStreamSelection(channelID string, videoIndex, audioIndex int) error {
+	e.mu.Lock()
+	session, exists := e.sessions[channelID]
+	e.mu.Unlock()
+	
+	if !exists {
+		return fmt.Errorf("no active session for channel %s", channelID)
+	}
+	
+	// Store the current input stream
+	currentStream := session.stream
+	
+	// Stop the current session
+	e.StopEncoding(channelID)
+	
+	// Wait for cleanup
+	time.Sleep(500 * time.Millisecond)
+	
+	// Restart with new stream selection
+	_, err := e.StartEncodingWithStreamSelection(channelID, currentStream, session.StreamURL, videoIndex, audioIndex)
+	return err
 }

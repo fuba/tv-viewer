@@ -7,7 +7,7 @@ services:
       - "18088:18088"
     environment:
       - PORT=18088
-      - MIRAKURUN_URL=http://localhost:40772
+      - MIRAKURUN_URL=http://tuner:40772
     volumes:
       - ./data:/app/data
       - stream_data:/app/stream
@@ -19,7 +19,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3001:80"
+      - "3001:3001"
     depends_on:
       - backend
     restart: unless-stopped

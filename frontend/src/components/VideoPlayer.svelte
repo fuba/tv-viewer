@@ -150,15 +150,24 @@
     if (Hls.isSupported()) {
       hls = new Hls({
         debug: true,
-        enableWorker: false,
-        lowLatencyMode: true,
-        backBufferLength: 6,   // 3 segments * 2 seconds
-        maxBufferLength: 12,   // 6 segments * 2 seconds  
+        enableWorker: true,  // Enable worker for better performance
+        lowLatencyMode: false, // Disable low latency for smoother playback
+        backBufferLength: 30,   // Keep 30 seconds of back buffer
+        maxBufferLength: 60,   // Allow up to 60 seconds of buffer
+        maxMaxBufferLength: 120, // Maximum buffer length
+        maxBufferSize: 60 * 1000 * 1000, // 60 MB buffer size
+        maxBufferHole: 0.5,  // Allow small gaps
+        highBufferWatchdogPeriod: 2,
+        nudgeOffset: 0.1,
+        nudgeMaxRetry: 10,
         manifestLoadingTimeOut: 10000,
-        manifestLoadingRetryDelay: 500, // Faster retries for 2-second segments
+        manifestLoadingRetryDelay: 1000,
         manifestLoadingMaxRetry: 20,
         levelLoadingTimeOut: 10000,
-        fragLoadingTimeOut: 10000,
+        fragLoadingTimeOut: 20000,
+        startFragPrefetch: true, // Prefetch next segment
+        // Progressive loading
+        progressive: true,
         // Prevent caching issues
         xhrSetup: function(xhr: XMLHttpRequest, url: string) {
           // Add cache-busting query parameter to all requests

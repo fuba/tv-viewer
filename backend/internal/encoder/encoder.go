@@ -51,9 +51,9 @@ func New() *Encoder {
 		e.nvencSupport = nvencSupport
 		e.useNVENC = nvencSupport.Available
 		if e.useNVENC {
-			log.Printf("NVENC hardware encoding enabled")
+			log.Printf("NVENC hardware encoding enabled with encoders: %v", nvencSupport.Encoders)
 		} else {
-			log.Printf("Using CPU encoding (libx264)")
+			log.Printf("NVENC not available, using CPU encoding (libx264)")
 		}
 	}
 	
@@ -231,7 +231,10 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 			)
 			// Add video codec args based on NVENC availability
 			quality := GetEncodingQuality()
-			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, quality)...)
+			log.Printf("BS channel encoding with quality=%s, useNVENC=%v", quality, e.useNVENC)
+			videoCodecArgs := GetVideoCodecArgs(e.useNVENC, quality)
+			log.Printf("Video codec args: %v", videoCodecArgs)
+			cmd.Args = append(cmd.Args, videoCodecArgs...)
 			cmd.Args = append(cmd.Args,
 				"-r", "30",
 				"-g", "30",
@@ -284,7 +287,10 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 			)
 			// Add video codec args based on NVENC availability
 			quality := GetEncodingQuality()
-			cmd.Args = append(cmd.Args, GetVideoCodecArgs(e.useNVENC, quality)...)
+			log.Printf("BS channel encoding with quality=%s, useNVENC=%v", quality, e.useNVENC)
+			videoCodecArgs := GetVideoCodecArgs(e.useNVENC, quality)
+			log.Printf("Video codec args: %v", videoCodecArgs)
+			cmd.Args = append(cmd.Args, videoCodecArgs...)
 			cmd.Args = append(cmd.Args,
 				"-r", "30", // Force 30fps output
 				"-g", "30", // GOP size (1 second at 30fps for 2-second segments)

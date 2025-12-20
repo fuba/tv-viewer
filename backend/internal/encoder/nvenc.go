@@ -22,18 +22,21 @@ func CheckNVENCSupport() (*NVENCSupport, error) {
 		Encoders:  []string{},
 	}
 
+	log.Printf("Checking for NVENC support...")
+
 	// Check for NVIDIA GPU
 	cmd := exec.Command("nvidia-smi", "--query-gpu=name", "--format=csv,noheader")
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	err := cmd.Run()
 	if err != nil {
-		log.Printf("No NVIDIA GPU detected: %v", err)
+		log.Printf("nvidia-smi command failed: %v", err)
 		return support, nil
 	}
 
 	gpuName := strings.TrimSpace(out.String())
 	if gpuName == "" {
+		log.Printf("No GPU name returned from nvidia-smi")
 		return support, nil
 	}
 
@@ -42,15 +45,20 @@ func CheckNVENCSupport() (*NVENCSupport, error) {
 	// Check ffmpeg for NVENC support
 	ffmpegPath, err := exec.LookPath("ffmpeg")
 	if err != nil {
+		log.Printf("ffmpeg not found in PATH")
 		return support, fmt.Errorf("ffmpeg not found")
 	}
+	log.Printf("Found ffmpeg at: %s", ffmpegPath)
 
 	// Get list of available encoders
 	cmd = exec.Command(ffmpegPath, "-encoders")
 	out.Reset()
 	cmd.Stdout = &out
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
 	err = cmd.Run()
 	if err != nil {
+		log.Printf("ffmpeg -encoders failed: %v, stderr: %s", err, stderr.String())
 		return support, fmt.Errorf("failed to get ffmpeg encoders: %w", err)
 	}
 
@@ -60,19 +68,21 @@ func CheckNVENCSupport() (*NVENCSupport, error) {
 	nvencEncoders := []string{
 		"h264_nvenc",
 		"hevc_nvenc",
+		"av1_nvenc",
 	}
 
 	for _, encoder := range nvencEncoders {
 		if strings.Contains(encodersOutput, encoder) {
 			support.Encoders = append(support.Encoders, encoder)
+			log.Printf("Found NVENC encoder: %s", encoder)
 		}
 	}
 
 	if len(support.Encoders) > 0 {
 		support.Available = true
-		log.Printf("NVENC encoders available: %v", support.Encoders)
+		log.Printf("NVENC is available with encoders: %v", support.Encoders)
 	} else {
-		log.Printf("No NVENC encoders found in ffmpeg")
+		log.Printf("No NVENC encoders found in ffmpeg output")
 	}
 
 	return support, nil

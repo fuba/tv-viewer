@@ -2,15 +2,24 @@ services:
   backend:
     build:
       context: ./backend
-      dockerfile: Dockerfile
+      dockerfile: Dockerfile.gpu
     ports:
       - "18088:18088"
     environment:
       - PORT=18088
       - MIRAKURUN_URL=http://tuner:40772
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
     volumes:
       - ./data:/app/data
       - stream_data:/app/stream
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
     restart: unless-stopped
     network_mode: host
 
@@ -24,6 +33,19 @@ services:
       - backend
     restart: unless-stopped
     network_mode: host
+
+  nginx:
+    build:
+      context: ./nginx
+      dockerfile: Dockerfile
+    ports:
+      - "8090:8090"
+    depends_on:
+      - backend
+    restart: unless-stopped
+    network_mode: host
+    volumes:
+      - stream_data:/app/stream:ro
 
 networks:
   tv-viewer-net:

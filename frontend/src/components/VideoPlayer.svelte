@@ -2,6 +2,7 @@
   import { onMount, onDestroy } from 'svelte'
   import Hls from 'hls.js'
   import SubtitleRenderer from './SubtitleRenderer.svelte'
+  import StreamSelector from './StreamSelector.svelte'
   
   export let selectedChannel: any
   
@@ -17,6 +18,7 @@
   let currentChannel: any = null
   let isStartingStream = false
   let hasUserInteracted = false
+  let showStreamSelector = false
   
   function addLog(message: string, type: 'info' | 'error' | 'success' = 'info') {
     const timestamp = new Date().toLocaleTimeString()
@@ -261,7 +263,12 @@
   }
 </script>
 
-<div class="bg-black rounded-lg overflow-hidden aspect-video relative">
+<div class="space-y-4">
+  <!-- Stream selector UI -->
+  <StreamSelector {selectedChannel} bind:show={showStreamSelector} />
+  
+  <!-- Video player container -->
+  <div class="bg-black rounded-lg overflow-hidden aspect-video relative">
   {#if selectedChannel}
     <video
       bind:this={videoElement}
@@ -288,6 +295,19 @@
   {:else}
     <div class="flex items-center justify-center h-full text-gray-500">
       <p class="text-xl">チャンネルを選択してください</p>
+    </div>
+  {/if}
+  </div>
+  
+  <!-- Control buttons -->
+  {#if selectedChannel && streamStarted}
+    <div class="flex justify-end mt-2">
+      <button
+        on:click={() => showStreamSelector = !showStreamSelector}
+        class="px-3 py-1 text-sm bg-gray-700 text-white rounded hover:bg-gray-600 transition-colors"
+      >
+        {showStreamSelector ? 'ストリーム選択を閉じる' : 'ストリーム選択'}
+      </button>
     </div>
   {/if}
 </div>

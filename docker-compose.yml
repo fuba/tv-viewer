@@ -3,6 +3,7 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.gpu
+    runtime: nvidia
     ports:
       - "18088:18088"
     environment:
@@ -10,6 +11,8 @@ services:
       - MIRAKURUN_URL=http://tuner:40772
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,video,utility
+      - USE_DIRECT_FFMPEG=true
+      - SKIP_TS_FILTER=true
     volumes:
       - ./data:/app/data
       - stream_data:/app/stream
@@ -28,7 +31,7 @@ services:
       context: ./frontend
       dockerfile: Dockerfile
     ports:
-      - "3001:3001"
+      - "18089:18089"
     depends_on:
       - backend
     restart: unless-stopped
@@ -39,7 +42,7 @@ services:
       context: ./nginx
       dockerfile: Dockerfile
     ports:
-      - "8090:8090"
+      - "18090:18090"
     depends_on:
       - backend
     restart: unless-stopped

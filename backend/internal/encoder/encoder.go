@@ -39,7 +39,7 @@ type Session struct {
 func New() *Encoder {
 	e := &Encoder{
 		sessions:      make(map[string]*Session),
-		maxConcurrent: 3, // Allow 3 concurrent encodings for CS channel testing
+		maxConcurrent: 1, // Allow 1 concurrent encoding
 		logs:          make(map[string][]string),
 	}
 	
@@ -82,7 +82,34 @@ func (e *Encoder) startEncodingWithType(channelID string, input io.ReadCloser, i
 
 func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.ReadCloser, streamURL string, isCSChannel bool, videoStreamIndex, audioStreamIndex int) (*Session, error) {
 	log.Printf("Starting encoding for channel %s (isCS: %v, video: %d, audio: %d)", channelID, isCSChannel, videoStreamIndex, audioStreamIndex)
-	
+
+	// Auto-select largest video stream if not specified and streamURL is available
+	// This is important because:
+	// 1. Different channels have video streams at different indices (e.g., #0 or #1)
+	// 2. Some channels may have multiple video streams with different resolutions
+	// 3. We want to automatically select the highest quality stream when available
+	// Note: For Japanese terrestrial digital TV, all channels typically have a single
+	// 1440x1080 MPEG-2 stream, but the stream index varies between channels.
+	if videoStreamIndex == -1 && streamURL != "" {
+		log.Printf("Auto-selecting largest video stream for channel %s", channelID)
+		streamInfo, err := GetStreamInfo(streamURL)
+		if err != nil {
+			log.Printf("Failed to get stream info for auto-selection: %v, using default", err)
+		} else {
+			selectedIndex := SelectLargestVideoStream(streamInfo)
+			if selectedIndex >= 0 {
+				videoStreamIndex = selectedIndex
+				log.Printf("Auto-selected video stream %d (largest resolution) for channel %s", videoStreamIndex, channelID)
+
+				// Log all video streams for debugging
+				videoStreams := FilterStreamsByType(streamInfo.Streams, "video")
+				for _, vs := range videoStreams {
+					log.Printf("  Video stream %d: %dx%d", vs.Index, vs.Width, vs.Height)
+				}
+			}
+		}
+	}
+
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	
@@ -169,6 +196,21 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 	
 	var cmd *exec.Cmd
 	
+	// Use direct URL if provided (better performance)
+	useDirectFFmpeg := os.Getenv("USE_DIRECT_FFMPEG")
+	useDirectURL := streamURL != "" && useDirectFFmpeg == "true"
+	inputSource := "pipe:0"
+	
+	log.Printf("Channel %s: USE_DIRECT_FFMPEG=%s, streamURL=%s, useDirectURL=%v", 
+		channelID, useDirectFFmpeg, streamURL, useDirectURL)
+	
+	if useDirectURL {
+		inputSource = streamURL
+		log.Printf("Using direct URL for channel %s: %s", channelID, streamURL)
+	} else {
+		log.Printf("Using pipe mode for channel %s", channelID)
+	}
+	
 	if isCSChannel {
 		// CS channel configuration - experimental copy mode for problematic channels
 		cmd = exec.CommandContext(ctx,
@@ -182,7 +224,7 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 			"-thread_queue_size", "1024",
 			"-err_detect", "ignore_err", 
 			"-max_streams", "50", 
-			"-i", "pipe:0",
+			"-i", inputSource,
 			"-y",
 			// Try copy mode first to avoid decoding issues
 			"-c", "copy", // Copy all streams without re-encoding
@@ -192,9 +234,9 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 			"-hls_list_size", "6",
 			"-hls_flags", "delete_segments+round_durations+independent_segments",
 			"-hls_allow_cache", "0",
-			"-hls_start_number_source", "epoch",
+			"-hls_start_number_source", "generic",
 			"-hls_init_time", "3.0",
-			"-hls_segment_filename", filepath.Join(outputDir, "segment%010d.ts"),
+			"-hls_segment_filename", filepath.Join(outputDir, "segment%03d.ts"),
 			filepath.Join(outputDir, "playlist.m3u8"),
 		)
 	} else {
@@ -213,19 +255,22 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				"-avoid_negative_ts", "make_zero",
 				"-thread_queue_size", "1024", // Larger queue for BS multi-program streams
 				"-err_detect", "ignore_err", // Ignore minor errors
-				"-i", "pipe:0",
+				"-i", inputSource,
 				"-y",
 			)
 			// Stream mapping based on selection
+			// We use absolute stream indices (e.g., "0:1") instead of relative indices (e.g., "0:v:0")
+			// because the stream index values come from ffprobe/API and represent absolute positions
+			// in the stream list. This matches what the frontend expects and displays to users.
 			if videoStreamIndex >= 0 {
-				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:v:%d", videoStreamIndex))
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:%d", videoStreamIndex))
 			} else {
-				cmd.Args = append(cmd.Args, "-map", "0:v:0") // Map first video stream
+				cmd.Args = append(cmd.Args, "-map", "0:v:0") // Map first video stream by type
 			}
 			if audioStreamIndex >= 0 {
-				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:a:%d", audioStreamIndex))
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:%d", audioStreamIndex))
 			} else {
-				cmd.Args = append(cmd.Args, "-map", "0:a:0") // Map first audio stream
+				cmd.Args = append(cmd.Args, "-map", "0:a:0") // Map first audio stream by type
 			}
 			cmd.Args = append(cmd.Args,
 			)
@@ -251,7 +296,7 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				"-hls_list_size", "3",
 				"-hls_flags", "delete_segments+round_durations+independent_segments+omit_endlist",
 				"-hls_allow_cache", "0",
-				"-hls_start_number_source", "epoch",
+				"-hls_start_number_source", "generic",
 				"-hls_init_time", "0.5",
 				"-force_key_frames", "expr:gte(t,n_forced*1)",
 				"-hls_segment_filename", filepath.Join(outputDir, "segment%03d.ts"),
@@ -269,19 +314,22 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				"-avoid_negative_ts", "make_zero", // Handle negative timestamps
 				"-thread_queue_size", "512", // Increase input thread queue size
 				"-err_detect", "ignore_err", // Ignore minor errors
-				"-i", "pipe:0", // Input from pipe
+				"-i", inputSource, // Input from pipe
 				"-y", // Overwrite output files
 			)
 			// Stream mapping based on selection
+			// We use absolute stream indices (e.g., "0:1") instead of relative indices (e.g., "0:v:0")
+			// because the stream index values come from ffprobe/API and represent absolute positions
+			// in the stream list. This matches what the frontend expects and displays to users.
 			if videoStreamIndex >= 0 {
-				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:v:%d", videoStreamIndex))
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:%d", videoStreamIndex))
 			} else {
-				cmd.Args = append(cmd.Args, "-map", "0:v:0") // Map first video stream
+				cmd.Args = append(cmd.Args, "-map", "0:v:0") // Map first video stream by type
 			}
 			if audioStreamIndex >= 0 {
-				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:a:%d", audioStreamIndex))
+				cmd.Args = append(cmd.Args, "-map", fmt.Sprintf("0:%d", audioStreamIndex))
 			} else {
-				cmd.Args = append(cmd.Args, "-map", "0:a:0") // Map first audio stream
+				cmd.Args = append(cmd.Args, "-map", "0:a:0") // Map first audio stream by type
 			}
 			cmd.Args = append(cmd.Args,
 			)
@@ -307,7 +355,7 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				"-hls_list_size", "3", // Even smaller playlist for fastest generation
 				"-hls_flags", "delete_segments+round_durations+independent_segments+omit_endlist",
 				"-hls_allow_cache", "0",
-				"-hls_start_number_source", "epoch",
+				"-hls_start_number_source", "generic",
 				"-hls_init_time", "0.5", // Force first segment at 0.5 seconds
 				"-force_key_frames", "expr:gte(t,n_forced*1)", // Force keyframes every 1 second
 				"-hls_segment_filename", filepath.Join(outputDir, "segment%03d.ts"),
@@ -316,10 +364,14 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 		}
 	}
 	
-	// Create buffered stdin pipe
-	stdinPipe, err := cmd.StdinPipe()
-	if err != nil {
-		return nil, err
+	// Create buffered stdin pipe only if not using direct URL
+	var stdinPipe io.WriteCloser
+	if !useDirectURL {
+		var err error
+		stdinPipe, err = cmd.StdinPipe()
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	// Capture stderr for debugging with proper goroutine handling
@@ -458,62 +510,81 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 	
 	log.Printf("FFmpeg process started for channel %s with PID %d", channelID, cmd.Process.Pid)
 	
-	// Copy input stream to FFmpeg stdin with MPEG-TS filtering
-	go func() {
-		defer func() {
-			stdinPipe.Close()
-			log.Printf("Input stream reader for channel %s stopped", channelID)
-		}()
-		
-		// Create filtered reader to remove problematic MPEG-TS packets
-		filteredInput := NewFilteredReader(input)
-		defer func() {
-			filteredInput.LogStats(channelID)
-			filteredInput.Close()
-		}()
-		
-		buf := make([]byte, 188*1024) // Use TS packet aligned buffer (188 bytes * 1024)
-		totalBytes := int64(0)
-		
-		for {
-			select {
-			case <-ctx.Done():
-				log.Printf("Context cancelled for channel %s", channelID)
-				return
-			default:
-				n, err := filteredInput.Read(buf)
-				if err != nil {
-					if err != io.EOF {
-						log.Printf("Error reading from filtered stream for channel %s after %d bytes: %v", channelID, totalBytes, err)
-					} else {
-						log.Printf("Filtered stream EOF for channel %s after %d bytes", channelID, totalBytes)
-					}
+	// Copy input stream to FFmpeg stdin with MPEG-TS filtering (only if not using direct URL)
+	if !useDirectURL {
+		go func() {
+			defer func() {
+				stdinPipe.Close()
+				log.Printf("Input stream reader for channel %s stopped", channelID)
+			}()
+			
+			// Create filtered reader to remove problematic MPEG-TS packets
+			// Skip filtering if SKIP_TS_FILTER is set (for better performance)
+			var reader io.Reader
+			if os.Getenv("SKIP_TS_FILTER") == "true" {
+				log.Printf("Skipping TS filtering for channel %s", channelID)
+				reader = input
+			} else {
+				filteredInput := NewFilteredReader(input)
+				defer func() {
+					filteredInput.LogStats(channelID)
+					filteredInput.Close()
+				}()
+				reader = filteredInput
+			}
+			
+			// Use larger buffer for better performance
+			buf := make([]byte, 188*1024*4) // Increased buffer size (752KB)
+			totalBytes := int64(0)
+			
+			for {
+				select {
+				case <-ctx.Done():
+					log.Printf("Context cancelled for channel %s", channelID)
 					return
-				}
-				if n > 0 {
-					totalBytes += int64(n)
-					if totalBytes%1024*1024 == 0 { // Log every MB
-						log.Printf("Channel %s: processed %d MB", channelID, totalBytes/(1024*1024))
+				default:
+					n, err := reader.Read(buf)
+					if err != nil {
+						if err != io.EOF {
+							log.Printf("Error reading from filtered stream for channel %s after %d bytes: %v", channelID, totalBytes, err)
+						} else {
+							log.Printf("Filtered stream EOF for channel %s after %d bytes", channelID, totalBytes)
+						}
+						return
 					}
-					
-					written := 0
-					for written < n {
-						select {
-						case <-ctx.Done():
-							return
-						default:
-							w, err := stdinPipe.Write(buf[written:n])
-							if err != nil {
-								log.Printf("Error writing to FFmpeg stdin for channel %s: %v", channelID, err)
+					if n > 0 {
+						totalBytes += int64(n)
+						if totalBytes%(10*1024*1024) == 0 { // Log every 10MB instead of 1MB
+							log.Printf("Channel %s: processed %d MB", channelID, totalBytes/(1024*1024))
+						}
+						
+						written := 0
+						for written < n {
+							select {
+							case <-ctx.Done():
 								return
+							default:
+								w, err := stdinPipe.Write(buf[written:n])
+								if err != nil {
+									log.Printf("Error writing to FFmpeg stdin for channel %s: %v", channelID, err)
+									return
+								}
+								written += w
 							}
-							written += w
 						}
 					}
 				}
 			}
+		}()
+	} else {
+		// If using direct URL, just close the input stream since we don't need it
+		if input != nil {
+			go func() {
+				defer input.Close()
+				log.Printf("Closing unused input stream for channel %s (using direct URL)", channelID)
+			}()
 		}
-	}()
+	}
 	
 	e.sessions[channelID] = session
 	

@@ -174,3 +174,30 @@ func FilterStreamsByType(streams []Stream, codecType string) []Stream {
 	}
 	return filtered
 }
+
+// SelectLargestVideoStream returns the index of the video stream with the largest resolution
+// Returns -1 if no video streams are found
+func SelectLargestVideoStream(info *StreamInfo) int {
+	if info == nil {
+		return -1
+	}
+
+	videoStreams := FilterStreamsByType(info.Streams, "video")
+	if len(videoStreams) == 0 {
+		return -1
+	}
+
+	// Find the stream with the largest resolution (width * height)
+	largestIndex := -1
+	largestResolution := 0
+
+	for _, stream := range videoStreams {
+		resolution := stream.Width * stream.Height
+		if resolution > largestResolution {
+			largestResolution = resolution
+			largestIndex = stream.Index
+		}
+	}
+
+	return largestIndex
+}

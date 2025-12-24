@@ -196,25 +196,26 @@ func streamChannel(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		
-		// Find the channel type and first service ID for CS channels
+		// Find the channel type and first service ID
 		var channelType string
 		var firstServiceID int64
 		var isCSChannel bool
-		
+
 		log.Printf("Looking for channel %s in %d channels", channelID, len(channels))
-		
+
 		for _, ch := range channels {
 			log.Printf("Checking channel: %s (type: %s) against %s", ch.Channel, ch.Type, channelID)
 			if ch.Channel == channelID {
 				channelType = ch.Type
 				isCSChannel = channelType == "CS"
-				log.Printf("Found matching channel %s, type: %s, isCS: %v, services: %d", 
+				log.Printf("Found matching channel %s, type: %s, isCS: %v, services: %d",
 					channelID, channelType, isCSChannel, len(ch.Services))
-				
-				// For CS channels, get the first service ID
-				if isCSChannel && len(ch.Services) > 0 {
+
+				// Get the first service ID for all channel types (not just CS)
+				// This is important because using service-specific URLs ensures we get full-seg (1080p) instead of one-seg (320x180)
+				if len(ch.Services) > 0 {
 					firstServiceID = ch.Services[0].ID
-					log.Printf("CS channel %s has %d services, using service ID %d (%s)", 
+					log.Printf("Channel %s has %d services, using service ID %d (%s)",
 						channelID, len(ch.Services), firstServiceID, ch.Services[0].Name)
 				}
 				break
@@ -230,18 +231,21 @@ func streamChannel(db *sql.DB) gin.HandlerFunc {
 		}
 		
 		log.Printf("Streaming channel %s with type %s", channelID, channelType)
-		
+
 		var stream io.ReadCloser
-		if isCSChannel && firstServiceID != 0 {
-			// For CS channels, use service-specific streaming
+		// Use service-specific streaming when available to ensure full-seg quality
+		if firstServiceID != 0 {
 			stream, err = client.GetServiceStream(firstServiceID)
 			if err != nil {
-				log.Printf("Failed to get stream for CS channel %s service %d: %v", channelID, firstServiceID, err)
+				log.Printf("Failed to get service stream for channel %s service %d: %v, falling back to channel stream", channelID, firstServiceID, err)
 				// Fall back to channel stream
 				stream, err = client.GetChannelStreamWithType(channelType, channelID)
+			} else {
+				log.Printf("Successfully got service stream for channel %s (service ID: %d)", channelID, firstServiceID)
 			}
 		} else {
-			// For non-CS channels, use regular channel streaming
+			// Fall back to channel streaming if no service ID available
+			log.Printf("No service ID available for channel %s, using channel stream", channelID)
 			stream, err = client.GetChannelStreamWithType(channelType, channelID)
 		}
 		
@@ -254,10 +258,18 @@ func streamChannel(db *sql.DB) gin.HandlerFunc {
 			return
 		}
 		// Note: Do NOT defer stream.Close() here as the encoder needs to manage the stream
-		
-		// Build the stream URL for ffprobe
-		streamURL := fmt.Sprintf("%s/api/channels/%s/stream/%s", mirakurunURL, channelType, url.QueryEscape(channelID))
-		
+
+		// Build the stream URL for direct ffmpeg connection and stream analysis
+		// Use service-specific URL when available to ensure we get full-seg (1080p) instead of one-seg (320x180)
+		var streamURL string
+		if firstServiceID != 0 {
+			streamURL = fmt.Sprintf("%s/api/services/%d/stream", mirakurunURL, firstServiceID)
+			log.Printf("Using service-specific URL for stream analysis: %s", streamURL)
+		} else {
+			streamURL = fmt.Sprintf("%s/api/channels/%s/%s/stream", mirakurunURL, channelType, channelID)
+			log.Printf("Using channel URL for stream analysis: %s", streamURL)
+		}
+
 		// Start encoding with stream URL for potential stream analysis
 		session, err := encoderInstance.StartEncodingWithStreamSelection(channelID, stream, streamURL, -1, -1)
 		if err != nil {

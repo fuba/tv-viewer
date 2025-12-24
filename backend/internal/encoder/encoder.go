@@ -255,6 +255,17 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				"-avoid_negative_ts", "make_zero",
 				"-thread_queue_size", "1024", // Larger queue for BS multi-program streams
 				"-err_detect", "ignore_err", // Ignore minor errors
+			)
+			// Add hardware decoder with deinterlacing if NVENC is available
+			// Japanese digital TV is typically 1080i (interlaced), so we need to deinterlace
+			if e.useNVENC {
+				cmd.Args = append(cmd.Args,
+					"-c:v", "mpeg2_cuvid",    // CUDA MPEG-2 hardware decoder
+					"-deint", "2",             // Adaptive deinterlacing at hardware level
+					"-drop_second_field", "1", // Drop second field to convert 30fps -> 29.97fps
+				)
+			}
+			cmd.Args = append(cmd.Args,
 				"-i", inputSource,
 				"-y",
 			)
@@ -314,6 +325,17 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				"-avoid_negative_ts", "make_zero", // Handle negative timestamps
 				"-thread_queue_size", "512", // Increase input thread queue size
 				"-err_detect", "ignore_err", // Ignore minor errors
+			)
+			// Add hardware decoder with deinterlacing if NVENC is available
+			// Japanese digital TV is typically 1080i (interlaced), so we need to deinterlace
+			if e.useNVENC {
+				cmd.Args = append(cmd.Args,
+					"-c:v", "mpeg2_cuvid",    // CUDA MPEG-2 hardware decoder
+					"-deint", "2",             // Adaptive deinterlacing at hardware level
+					"-drop_second_field", "1", // Drop second field to convert 30fps -> 29.97fps
+				)
+			}
+			cmd.Args = append(cmd.Args,
 				"-i", inputSource, // Input from pipe
 				"-y", // Overwrite output files
 			)

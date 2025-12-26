@@ -56,7 +56,19 @@ func New() *Encoder {
 			log.Printf("NVENC not available, using CPU encoding (libx264)")
 		}
 	}
-	
+
+	// Clean up old stream directories on startup
+	streamDir := "stream"
+	if err := os.RemoveAll(streamDir); err != nil {
+		log.Printf("Warning: Failed to clean up old stream directory: %v", err)
+	} else {
+		log.Printf("Cleaned up old stream directories")
+	}
+	// Recreate the stream directory
+	if err := os.MkdirAll(streamDir, 0755); err != nil {
+		log.Printf("Warning: Failed to create stream directory: %v", err)
+	}
+
 	return e
 }
 
@@ -304,7 +316,7 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				// HLS output
 				"-f", "hls",
 				"-hls_time", "2",
-				"-hls_list_size", "3",
+				"-hls_list_size", "10", // Keep 20 seconds of segments for browser compatibility
 				"-hls_flags", "delete_segments+round_durations+independent_segments+omit_endlist",
 				"-hls_allow_cache", "0",
 				"-hls_start_number_source", "generic",
@@ -373,8 +385,8 @@ func (e *Encoder) startEncodingWithTypeAndStreams(channelID string, input io.Rea
 				"-ar", "48000",
 				// HLS output
 				"-f", "hls",
-				"-hls_time", "2", // Reduced segment time for faster startup
-				"-hls_list_size", "3", // Even smaller playlist for fastest generation
+				"-hls_time", "2", // 2-second segments
+				"-hls_list_size", "10", // Keep 20 seconds of segments for browser compatibility
 				"-hls_flags", "delete_segments+round_durations+independent_segments+omit_endlist",
 				"-hls_allow_cache", "0",
 				"-hls_start_number_source", "generic",

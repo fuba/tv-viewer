@@ -154,6 +154,24 @@ func startWebRTCStream(c *gin.Context) {
 		}
 	}()
 
+	// Start streaming subtitles to peer (wait for subtitle pipe to be ready)
+	go func() {
+		// Wait up to 5 seconds for subtitle pipe to be ready
+		for i := 0; i < 50; i++ {
+			if session.SubtitlePipe != nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if session.SubtitlePipe == nil {
+			log.Printf("[WebRTC] Subtitle pipe not ready for channel %s, skipping subtitles", channelID)
+			return
+		}
+		if err := peer.StreamSubtitles(session.SubtitlePipe); err != nil {
+			log.Printf("[WebRTC] Subtitle stream ended for channel %s: %v", channelID, err)
+		}
+	}()
+
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "streaming",
 		"peerId":    peer.ID,
@@ -490,6 +508,24 @@ func handleWebRTCSignaling(c *gin.Context) {
 				}
 			}()
 
+			// Start streaming subtitles
+			go func() {
+				// Wait up to 5 seconds for subtitle pipe to be ready
+				for i := 0; i < 50; i++ {
+					if session.SubtitlePipe != nil {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+				if session.SubtitlePipe == nil {
+					log.Printf("[WebRTC] Subtitle pipe not ready, skipping subtitles")
+					return
+				}
+				if err := peer.StreamSubtitles(session.SubtitlePipe); err != nil {
+					log.Printf("[WebRTC] Subtitle stream ended: %v", err)
+				}
+			}()
+
 		case webrtc.MsgTypeAnswer:
 			if peer == nil || msg.SDP == nil {
 				continue
@@ -625,6 +661,23 @@ func StartWebRTCServiceStream(c *gin.Context) {
 		}
 		if err := peer.StreamOpus(session.AudioPipe); err != nil {
 			log.Printf("[WebRTC] Service audio stream ended: %v", err)
+		}
+	}()
+
+	go func() {
+		// Wait up to 5 seconds for subtitle pipe to be ready
+		for i := 0; i < 50; i++ {
+			if session.SubtitlePipe != nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if session.SubtitlePipe == nil {
+			log.Printf("[WebRTC] Subtitle pipe not ready for service, skipping subtitles")
+			return
+		}
+		if err := peer.StreamSubtitles(session.SubtitlePipe); err != nil {
+			log.Printf("[WebRTC] Service subtitle stream ended: %v", err)
 		}
 	}()
 

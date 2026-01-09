@@ -135,8 +135,10 @@
         onSubtitle: (subtitle) => {
           if (subtitle.type === 'show') {
             subtitles = [...subtitles, subtitle]
-          } else if (subtitle.type === 'hide' || subtitle.type === 'clear') {
+          } else if (subtitle.type === 'hide') {
             subtitles = subtitles.filter(s => s.id !== subtitle.id)
+          } else if (subtitle.type === 'clear') {
+            subtitles = []
           }
         },
         onError: (error) => {

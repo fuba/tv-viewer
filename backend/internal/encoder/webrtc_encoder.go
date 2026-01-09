@@ -23,7 +23,9 @@ type WebRTCSession struct {
 	stream           io.ReadCloser
 	VideoPipe        io.ReadCloser // FFmpeg H.264 video output (stdout)
 	AudioPipe        io.ReadCloser // FFmpeg Opus audio output
+	SubtitlePipe     io.ReadCloser // FFmpeg subtitle output
 	audioFifoPath    string        // Path to audio FIFO
+	subtitleFifoPath string        // Path to subtitle FIFO
 	VideoStreamIndex int
 	AudioStreamIndex int
 	StreamURL        string
@@ -80,8 +82,18 @@ func (e *Encoder) StartWebRTCEncoding(channelID string, input io.ReadCloser, str
 	}
 	log.Printf("[WebRTC] Created audio FIFO: %s", audioFifoPath)
 
-	// Build FFmpeg args for WebRTC (H.264 to stdout, Opus to FIFO)
-	args := e.buildWebRTCFFmpegArgs(channelID, videoIndex, audioIndex, audioFifoPath)
+	// Create subtitle FIFO for ARIB caption output
+	subtitleFifoPath := fmt.Sprintf("/tmp/webrtc-subtitle-%s.fifo", sessionID)
+	os.Remove(subtitleFifoPath)
+	if err := syscall.Mkfifo(subtitleFifoPath, 0644); err != nil {
+		cancel()
+		os.Remove(audioFifoPath)
+		return nil, fmt.Errorf("failed to create subtitle FIFO: %w", err)
+	}
+	log.Printf("[WebRTC] Created subtitle FIFO: %s", subtitleFifoPath)
+
+	// Build FFmpeg args for WebRTC (H.264 to stdout, Opus to FIFO, subtitles to FIFO)
+	args := e.buildWebRTCFFmpegArgs(channelID, videoIndex, audioIndex, audioFifoPath, subtitleFifoPath)
 
 	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
 
@@ -115,6 +127,7 @@ func (e *Encoder) StartWebRTCEncoding(channelID string, input io.ReadCloser, str
 		stream:           input,
 		VideoPipe:        videoPipe,
 		audioFifoPath:    audioFifoPath,
+		subtitleFifoPath: subtitleFifoPath,
 		VideoStreamIndex: videoIndex,
 		AudioStreamIndex: audioIndex,
 		StreamURL:        streamURL,
@@ -124,7 +137,8 @@ func (e *Encoder) StartWebRTCEncoding(channelID string, input io.ReadCloser, str
 	log.Printf("[WebRTC] Starting FFmpeg: %s %v", ffmpegPath, args)
 	if err := cmd.Start(); err != nil {
 		cancel()
-		os.Remove(audioFifoPath) // Clean up FIFO on failure
+		os.Remove(audioFifoPath)    // Clean up FIFOs on failure
+		os.Remove(subtitleFifoPath)
 		return nil, fmt.Errorf("failed to start FFmpeg: %w", err)
 	}
 	session.started = true
@@ -141,6 +155,19 @@ func (e *Encoder) StartWebRTCEncoding(channelID string, input io.ReadCloser, str
 		session.AudioPipe = audioPipe
 		session.mu.Unlock()
 		log.Printf("[WebRTC] Audio FIFO opened for reading")
+	}()
+
+	// Open subtitle FIFO for reading (this blocks until FFmpeg opens it for writing)
+	go func() {
+		subtitlePipe, err := os.Open(subtitleFifoPath)
+		if err != nil {
+			log.Printf("[WebRTC] Failed to open subtitle FIFO: %v", err)
+			return
+		}
+		session.mu.Lock()
+		session.SubtitlePipe = subtitlePipe
+		session.mu.Unlock()
+		log.Printf("[WebRTC] Subtitle FIFO opened for reading")
 	}()
 
 	// Handle stderr logging
@@ -265,7 +292,7 @@ func (e *Encoder) StartWebRTCEncoding(channelID string, input io.ReadCloser, str
 }
 
 // buildWebRTCFFmpegArgs builds FFmpeg arguments for WebRTC output
-func (e *Encoder) buildWebRTCFFmpegArgs(channelID string, videoStreamIndex, audioStreamIndex int, audioFifoPath string) []string {
+func (e *Encoder) buildWebRTCFFmpegArgs(channelID string, videoStreamIndex, audioStreamIndex int, audioFifoPath, subtitleFifoPath string) []string {
 	isBSChannel := strings.HasPrefix(channelID, "BS")
 	isCSChannel := strings.HasPrefix(channelID, "CS")
 
@@ -359,6 +386,15 @@ func (e *Encoder) buildWebRTCFFmpegArgs(channelID string, videoStreamIndex, audi
 		audioFifoPath,
 	)
 
+	// === Output 3: Subtitles (ASS to FIFO) ===
+	// Extract ARIB captions as ASS format for DataChannel transmission
+	args = append(args,
+		"-map", "0:s:0?",             // First subtitle stream (optional)
+		"-c:s", "ass",                // Convert to ASS format
+		"-f", "ass",                  // ASS container
+		subtitleFifoPath,
+	)
+
 	return args
 }
 
@@ -427,10 +463,21 @@ func (s *WebRTCSession) Stop() {
 		s.AudioPipe = nil
 	}
 
+	if s.SubtitlePipe != nil {
+		s.SubtitlePipe.Close()
+		s.SubtitlePipe = nil
+	}
+
 	// Clean up audio FIFO
 	if s.audioFifoPath != "" {
 		os.Remove(s.audioFifoPath)
 		s.audioFifoPath = ""
+	}
+
+	// Clean up subtitle FIFO
+	if s.subtitleFifoPath != "" {
+		os.Remove(s.subtitleFifoPath)
+		s.subtitleFifoPath = ""
 	}
 
 	log.Printf("[WebRTC] Session %s stopped", s.ID)

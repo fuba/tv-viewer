@@ -113,6 +113,27 @@ func (c *Client) GetPrograms(serviceID int) ([]Program, error) {
 	return programs, nil
 }
 
+// GetAllPrograms fetches all programs from Mirakurun without serviceId filter
+func (c *Client) GetAllPrograms() ([]Program, error) {
+	url := fmt.Sprintf("%s/api/programs", c.baseURL)
+	resp, err := c.httpClient.Get(url)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+
+	var programs []Program
+	if err := json.NewDecoder(resp.Body).Decode(&programs); err != nil {
+		return nil, err
+	}
+
+	return programs, nil
+}
+
 func (c *Client) GetServiceStream(serviceID int64) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/api/services/%d/stream", c.baseURL, serviceID)
 	log.Printf("Requesting service stream from Mirakurun: %s", url)

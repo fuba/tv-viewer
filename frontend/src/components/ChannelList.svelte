@@ -1,8 +1,10 @@
 <script lang="ts">
-  import { onMount } from 'svelte'
-  
+  import { onMount, createEventDispatcher } from 'svelte'
+
   export let selectedChannel: any = null
-  
+
+  const dispatch = createEventDispatcher()
+
   let channels: any[] = []
   let loading = true
   let activeTab: 'GR' | 'BS' | 'CS' = 'GR'
@@ -17,13 +19,13 @@
       
       allChannels.forEach((ch: any) => {
         if (!ch.services || ch.services.length === 0) return
-        
-        if (ch.type === 'CS') {
-          // For CS channels, create an item for each service
+
+        // For all channel types, if there are multiple services, expand them
+        if (ch.services.length > 1) {
           ch.services.forEach((service: any) => {
             processedChannels.push({
               ...ch,
-              serviceId: service.serviceId || service.id,
+              serviceId: service.id,  // Use Mirakurun's internal service ID
               serviceName: service.name,
               displayName: service.name,
               // Keep original channel info for API calls
@@ -31,12 +33,12 @@
               isService: true
             })
           })
-        } else if (ch.type === 'GR' || ch.type === 'BS') {
-          // For GR and BS, keep as is
+        } else {
+          // Single service: keep as is
           processedChannels.push({
             ...ch,
             displayName: ch.services[0]?.name || ch.name,
-            serviceId: ch.services[0]?.serviceId || ch.services[0]?.id,
+            serviceId: ch.services[0]?.id,  // Use Mirakurun's internal service ID
             isService: false
           })
         }
@@ -67,6 +69,7 @@
   
   function selectChannel(channel: any) {
     selectedChannel = channel
+    dispatch('select', channel)
   }
 </script>
 

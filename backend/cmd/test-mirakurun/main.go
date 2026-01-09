@@ -25,7 +25,7 @@ func main() {
 		// Test programs for first channel
 		if len(channels[0].Services) > 0 {
 			serviceID := channels[0].Services[0].ID
-			programs, err := client.GetPrograms(serviceID)
+			programs, err := client.GetPrograms(int(serviceID))
 			if err != nil {
 				log.Printf("Failed to get programs: %v", err)
 			} else {

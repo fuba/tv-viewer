@@ -25,8 +25,9 @@
   async function fetchPrograms(channel: any) {
     loading = true
     try {
-      // Use serviceId if available (for CS services), otherwise use first service ID
-      const serviceId = channel.serviceId || channel.services?.[0]?.id
+      // Use serviceId (small number) from services array - this is what Mirakurun programs API expects
+      // Note: service.id is the large composite ID, service.serviceId is the actual service ID
+      const serviceId = channel.services?.[0]?.serviceId
       if (!serviceId) {
         console.log('No serviceId found for channel:', channel)
         programs = []

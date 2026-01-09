@@ -1,268 +1,195 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte'
-  import Hls from 'hls.js'
-  import SubtitleRenderer from './SubtitleRenderer.svelte'
-  import StreamSelector from './StreamSelector.svelte'
-  
+  import { onDestroy } from 'svelte'
+  import { RTCClient, type ConnectionStatus, type SubtitleMessage } from '../lib/webrtc/RTCClient'
+
   export let selectedChannel: any
-  
+
   // Export logs for external display
   export let debugLogs: string[] = []
   export let ffmpegLogs: string[] = []
-  
-  // showDebug passed from parent but not used in this component
-  
+
+  // Export connection status for MetaBar
+  export let connectionStatus: ConnectionStatus = 'disconnected'
+  export let streamStarted = false
+
   let videoElement: HTMLVideoElement
-  let hls: Hls | null = null
-  let streamStarted = false
+  let rtcClient: RTCClient | null = null
+  let mediaStream: MediaStream | null = null
   let currentChannel: any = null
   let isStartingStream = false
   let hasUserInteracted = false
-  let showStreamSelector = false
-  
+  let currentSessionId: string = ''
+  let subtitles: SubtitleMessage[] = []
+  let tracksReceived = 0
+  let videoReadyState = 0
+  let streamSequence = 0 // Used to ignore callbacks from old streams
+  let videoWidth = 0 // Track video width for aspect ratio handling
+
   function addLog(message: string, type: 'info' | 'error' | 'success' = 'info') {
     const timestamp = new Date().toLocaleTimeString()
     const logEntry = `[${timestamp}] ${message}`
-    debugLogs = [logEntry, ...debugLogs.slice(0, 99999)] // Keep last 100000 logs
+    debugLogs = [logEntry, ...debugLogs.slice(0, 99999)]
     console.log(message)
   }
-  
+
   $: if (selectedChannel && videoElement) {
-    // Prevent duplicate requests for the same channel
     if (!isStartingStream && selectedChannel !== currentChannel) {
       startStream(selectedChannel)
     }
   }
-  
+
   async function startStream(channel: any) {
+    // Increment sequence to invalidate any pending callbacks from old streams
+    streamSequence++
+    const thisStreamSequence = streamSequence
+
     if (isStartingStream) {
-      addLog(`Stream already starting, ignoring duplicate request`)
-      return
+      addLog('Stream already starting, forcing restart for new channel')
     }
-    
+
     isStartingStream = true
     currentChannel = channel
     const startTime = Date.now()
     streamStarted = false
-    addLog(`[${startTime}] Starting stream for channel ${channel.channel} (${channel.name})`)
-    
-    // Stop existing stream first
-    if (hls) {
-      hls.destroy()
-      hls = null
-      addLog(`[${Date.now() - startTime}ms] Stopped existing HLS stream`)
+    tracksReceived = 0
+
+    addLog(`[${startTime}] Starting WebRTC stream for channel ${channel.channel} (${channel.name}) [seq=${thisStreamSequence}]`)
+
+    // Cleanup existing connection - wait for disconnect to complete
+    if (rtcClient) {
+      await rtcClient.disconnect()
+      rtcClient = null
     }
-    
-    // Clear video source to prevent old content from showing
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(track => track.stop())
+      mediaStream = null
+    }
+
     if (videoElement) {
-      videoElement.src = ''
-      videoElement.load() // Force reload to clear any cached content
-      addLog(`[${Date.now() - startTime}ms] Cleared video element`)
+      videoElement.srcObject = null
     }
-    
-    // Use channel number since id is empty
+
+    connectionStatus = 'disconnected'
+    subtitles = []
+    videoWidth = 0
+
     const channelId = channel.channel || channel.id
-    const encodedChannelId = encodeURIComponent(channelId)
-    
-    // First start the encoding
+
     try {
-      addLog(`[${Date.now() - startTime}ms] Requesting encoding start for channel ${channelId}`)
-      const response = await fetch(`/api/channels/${encodedChannelId}/stream`, {
-        method: 'GET'
-      })
-      
-      if (response.ok) {
-        const data = await response.json()
-        addLog(`[${Date.now() - startTime}ms] Stream started: ${data.sessionId}`, 'success')
-        
-        // Start fetching FFmpeg logs
-        fetchFFmpegLogs(channel)
-        
-        // Poll for playlist availability with increased retries
-        let retries = 0
-        const maxRetries = 30 // Increased retry count
-        const checkPlaylist = async () => {
-          try {
-            const checkTime = Date.now()
-            const playlistResponse = await fetch(`/api/stream/${encodedChannelId}/playlist.m3u8?t=${checkTime}`)
-            addLog(`[${checkTime - startTime}ms] Checking playlist: status ${playlistResponse.status}`)
-            
-            if (playlistResponse.ok) {
-              // Verify playlist content is valid
-              const playlistContent = await playlistResponse.text()
-              if (playlistContent.includes('#EXTM3U') && playlistContent.includes('.ts')) {
-                addLog(`[${Date.now() - startTime}ms] Valid playlist ready, loading video`, 'success')
-                loadVideo(channel)
-                streamStarted = true
-                isStartingStream = false
-                return
-              } else {
-                addLog(`[${Date.now() - startTime}ms] Playlist exists but content not ready yet - Length: ${playlistContent.length}`)
-              }
-            }
-            
-            if (retries < maxRetries) {
-              retries++
-              addLog(`Playlist not ready, retrying... (${retries}/${maxRetries}) - HTTP ${playlistResponse.status}`)
-              // Very aggressive retry timing
-              const baseDelay = 200
-              const delay = Math.min(baseDelay + (retries * 25), 1500)
-              setTimeout(checkPlaylist, delay)
-            } else {
-              addLog(`Playlist not available after ${maxRetries} retries`, 'error')
-              isStartingStream = false
-            }
-          } catch (error) {
-            if (retries < maxRetries) {
-              retries++
-              addLog(`Error checking playlist (${retries}/${maxRetries}): ${error}`)
-              setTimeout(checkPlaylist, 1000)
-            } else {
-              addLog(`Failed to check playlist after ${maxRetries} retries: ${error}`, 'error')
-              isStartingStream = false
-            }
+      // Create WebRTC client
+      rtcClient = new RTCClient({
+        channelId,
+        onTrack: (track, stream) => {
+          // Ignore callbacks from old streams
+          if (thisStreamSequence !== streamSequence) {
+            addLog(`[${Date.now() - startTime}ms] Ignoring track from old stream [seq=${thisStreamSequence}, current=${streamSequence}]`)
+            return
           }
+
+          tracksReceived++
+          addLog(`[${Date.now() - startTime}ms] Received ${track.kind} track (total: ${tracksReceived})`, 'success')
+          addLog(`[${Date.now() - startTime}ms] Stream tracks: video=${stream.getVideoTracks().length}, audio=${stream.getAudioTracks().length}`)
+
+          // Only set srcObject once, when video track is first available
+          const needsSourceUpdate = !mediaStream || mediaStream !== stream
+          mediaStream = stream
+
+          if (videoElement && needsSourceUpdate && stream.getVideoTracks().length > 0) {
+            // Only set srcObject if it's different from current
+            if (videoElement.srcObject !== stream) {
+              videoElement.srcObject = stream
+              videoReadyState = videoElement.readyState
+              addLog(`[${Date.now() - startTime}ms] Video source set, readyState=${videoReadyState}`, 'success')
+
+              // iOS requires explicit play() call after setting srcObject
+              videoElement.play().then(() => {
+                if (thisStreamSequence !== streamSequence) return // Check again after async
+                videoReadyState = videoElement.readyState
+                addLog(`[${Date.now() - startTime}ms] Video playback started, readyState=${videoReadyState}`, 'success')
+              }).catch((err) => {
+                if (thisStreamSequence !== streamSequence) return
+                addLog(`[${Date.now() - startTime}ms] Video play error: ${err.message}`, 'error')
+              })
+            } else {
+              addLog(`[${Date.now() - startTime}ms] Stream already set, skipping`, 'info')
+            }
+          } else if (!videoElement) {
+            addLog(`[${Date.now() - startTime}ms] WARNING: videoElement is null!`, 'error')
+          }
+
+          streamStarted = true
+          isStartingStream = false
+        },
+        onConnectionStateChange: (state) => {
+          connectionStatus = state
+          addLog(`[WebRTC] Connection state: ${state}`)
+
+          if (state === 'connected') {
+            addLog('WebRTC connected - low latency streaming active', 'success')
+          } else if (state === 'failed') {
+            addLog('WebRTC connection failed', 'error')
+            isStartingStream = false
+          }
+        },
+        onSubtitle: (subtitle) => {
+          if (subtitle.type === 'show') {
+            subtitles = [...subtitles, subtitle]
+          } else if (subtitle.type === 'hide' || subtitle.type === 'clear') {
+            subtitles = subtitles.filter(s => s.id !== subtitle.id)
+          }
+        },
+        onError: (error) => {
+          addLog(`WebRTC error: ${error.message}`, 'error')
+          isStartingStream = false
+        },
+        onLog: (message) => {
+          debugLogs = [message, ...debugLogs.slice(0, 99999)]
         }
-        
-        // Start checking immediately
-        checkPlaylist()
-      } else {
-        addLog(`Failed to start stream: HTTP ${response.status}`, 'error')
-        isStartingStream = false
-      }
+      })
+
+      // Connect
+      await rtcClient.connect()
+      currentSessionId = rtcClient.getPeerId() || channelId
+
+      // Fetch FFmpeg logs periodically
+      fetchFFmpegLogs(channelId)
+
     } catch (error) {
-      addLog(`Failed to start stream: ${error}`, 'error')
+      addLog(`Failed to start WebRTC stream: ${error}`, 'error')
       isStartingStream = false
     }
   }
-  
-  function loadVideo(channel: any) {
-    if (hls) {
-      hls.destroy()
-    }
-    
-    // Clear video element completely
-    if (videoElement) {
-      videoElement.src = ''
-      videoElement.load()
-    }
-    
-    if (Hls.isSupported()) {
-      hls = new Hls({
-        debug: true,
-        enableWorker: true,  // Enable worker for better performance
-        lowLatencyMode: false, // Disable low latency for smoother playback
-        backBufferLength: 30,   // Keep 30 seconds of back buffer
-        maxBufferLength: 60,   // Allow up to 60 seconds of buffer
-        maxMaxBufferLength: 120, // Maximum buffer length
-        maxBufferSize: 60 * 1000 * 1000, // 60 MB buffer size
-        maxBufferHole: 0.5,  // Allow small gaps
-        highBufferWatchdogPeriod: 2,
-        nudgeOffset: 0.1,
-        nudgeMaxRetry: 10,
-        manifestLoadingTimeOut: 10000,
-        manifestLoadingRetryDelay: 1000,
-        manifestLoadingMaxRetry: 20,
-        levelLoadingTimeOut: 10000,
-        fragLoadingTimeOut: 20000,
-        startFragPrefetch: true, // Prefetch next segment
-        // Progressive loading
-        progressive: true,
-        // Prevent caching issues
-        xhrSetup: function(xhr: XMLHttpRequest, url: string) {
-          // Add cache-busting query parameter to all requests
-          const separator = url.includes('?') ? '&' : '?'
-          const cacheParam = `_t=${Date.now()}&_r=${Math.random()}`
-          xhr.open('GET', url + separator + cacheParam, true)
-          // Force no-cache headers
-          xhr.setRequestHeader('Cache-Control', 'no-cache, no-store, must-revalidate')
-          xhr.setRequestHeader('Pragma', 'no-cache')
-          xhr.setRequestHeader('Expires', '0')
-        }
-      })
-      
-      const channelId = channel.channel || channel.id
-      const encodedChannelId = encodeURIComponent(channelId)
-      
-      hls.on(Hls.Events.ERROR, function (event, data) {
-        addLog(`HLS error: ${data.type} - ${data.details}`, 'error')
-        if (data.fatal) {
-          switch(data.type) {
-            case Hls.ErrorTypes.NETWORK_ERROR:
-              addLog('Network error, retrying in 1 second...')
-              setTimeout(() => {
-                hls.startLoad()
-              }, 1000)
-              break
-            case Hls.ErrorTypes.MEDIA_ERROR:
-              addLog('Media error, attempting recovery...')
-              hls.recoverMediaError()
-              break
-            default:
-              addLog('Fatal HLS error, destroying instance', 'error')
-              hls.destroy()
-              break
-          }
-        }
-      })
-      
-      hls.on(Hls.Events.MANIFEST_LOADED, function(event, data) {
-        addLog('HLS manifest loaded successfully', 'success')
-      })
-      
-      hls.on(Hls.Events.LEVEL_LOADED, function(event, data) {
-        addLog(`HLS level loaded: ${data.details.fragments.length} fragments`, 'success')
-      })
-      
-      hls.on(Hls.Events.FRAG_LOADED, function(event, data) {
-        addLog(`Fragment loaded: ${data.frag.relurl}`)
-      })
-      
-      addLog(`Loading HLS source: /api/stream/${encodedChannelId}/playlist.m3u8`)
-      
-      // Clear any existing data before loading new source
-      hls.attachMedia(videoElement)
-      hls.loadSource(`/api/stream/${encodedChannelId}/playlist.m3u8`)
-      
-      // Start loading immediately
-      hls.startLoad()
-    } else if (videoElement.canPlayType('application/vnd.apple.mpegurl')) {
-      const channelId = channel.channel || channel.id
-      const encodedChannelId = encodeURIComponent(channelId)
-      addLog('Using native HLS support')
-      videoElement.src = `/api/stream/${encodedChannelId}/playlist.m3u8`
-    } else {
-      addLog('HLS not supported in this browser', 'error')
-    }
-  }
-  
-  async function fetchFFmpegLogs(channel: any) {
+
+  async function fetchFFmpegLogs(channelId: string) {
     try {
-      const channelId = channel.channel || channel.id
-      const encodedChannelId = encodeURIComponent(channelId)
-      const response = await fetch(`/api/logs/${encodedChannelId}`)
-      
+      const response = await fetch(`/api/logs/${encodeURIComponent(channelId)}`)
       if (response.ok) {
         const data = await response.json()
         ffmpegLogs = data.logs || []
-        addLog(`FFmpeg logs fetched: ${ffmpegLogs.length} entries`)
       }
     } catch (error) {
-      addLog(`Failed to fetch FFmpeg logs: ${error}`, 'error')
+      // Silently fail for log fetching
     }
-    
+
     // Continue fetching logs every 2 seconds while streaming
-    if (streamStarted) {
-      setTimeout(() => fetchFFmpegLogs(channel), 2000)
+    if (streamStarted && rtcClient) {
+      setTimeout(() => fetchFFmpegLogs(channelId), 2000)
     }
   }
 
   onDestroy(() => {
-    if (hls) {
-      hls.destroy()
+    if (rtcClient) {
+      rtcClient.disconnect()
+      rtcClient = null
+    }
+
+    if (mediaStream) {
+      mediaStream.getTracks().forEach(track => track.stop())
+      mediaStream = null
     }
   })
-  
+
   function handleVideoClick() {
     if (videoElement && !hasUserInteracted) {
       hasUserInteracted = true
@@ -272,51 +199,67 @@
   }
 </script>
 
-<div class="space-y-4">
-  <!-- Stream selector UI -->
-  <StreamSelector {selectedChannel} bind:show={showStreamSelector} />
-  
-  <!-- Video player container -->
-  <div class="bg-black rounded-lg overflow-hidden aspect-video relative">
-  {#if selectedChannel}
-    <video
-      bind:this={videoElement}
-      class="w-full h-full"
-      controls
-      autoplay
-      playsinline
-      webkit-playsinline
-      muted
-      on:click={handleVideoClick}
-      on:play={() => {
-        if (!hasUserInteracted && videoElement) {
-          addLog('Video playing (muted for autoplay)')
-        }
-      }}
-    >
-    </video>
-    {#if streamStarted}
-      <SubtitleRenderer
-        subtitleUrl={`/api/stream/${selectedChannel.channel || selectedChannel.id}/subtitles.ass`}
-        {videoElement}
-      />
-    {/if}
-  {:else}
-    <div class="flex items-center justify-center h-full text-gray-500">
-      <p class="text-xl">チャンネルを選択してください</p>
-    </div>
-  {/if}
-  </div>
-  
-  <!-- Control buttons -->
-  {#if selectedChannel && streamStarted}
-    <div class="flex justify-end mt-2">
-      <button
-        on:click={() => showStreamSelector = !showStreamSelector}
-        class="px-3 py-1 text-sm bg-gray-700 text-white rounded hover:bg-gray-600 transition-colors"
+<!-- Theater mode: full width video container -->
+<div class="w-full h-full flex items-center justify-center">
+  <div class="w-full max-w-[1800px] aspect-video bg-black relative">
+    {#if selectedChannel}
+      <!-- svelte-ignore a11y-media-has-caption -->
+      <video
+        bind:this={videoElement}
+        class="w-full h-full"
+        style="object-fit: {videoWidth === 1440 ? 'fill' : 'contain'};"
+        controls
+        autoplay
+        playsinline
+        muted
+        on:click={handleVideoClick}
+        on:play={() => {
+          addLog(`Video play event, paused=${videoElement?.paused}, currentTime=${videoElement?.currentTime}`)
+        }}
+        on:playing={() => {
+          addLog(`Video playing event`)
+        }}
+        on:waiting={() => {
+          addLog(`Video waiting event (buffering)`)
+        }}
+        on:stalled={() => {
+          addLog(`Video stalled event`)
+        }}
+        on:error={() => {
+          const err = videoElement?.error
+          addLog(`Video error: ${err?.code} ${err?.message}`, 'error')
+        }}
+        on:loadeddata={() => {
+          videoWidth = videoElement?.videoWidth || 0
+          addLog(`Video loadeddata, videoWidth=${videoWidth}, videoHeight=${videoElement?.videoHeight}`)
+        }}
       >
-        {showStreamSelector ? 'ストリーム選択を閉じる' : 'ストリーム選択'}
-      </button>
-    </div>
-  {/if}
+      </video>
+
+      <!-- Subtitle overlay -->
+      {#if subtitles.length > 0}
+        <div class="absolute bottom-16 left-0 right-0 text-center pointer-events-none">
+          {#each subtitles as subtitle}
+            <div class="inline-block bg-black/70 text-white px-3 py-1 rounded text-lg">
+              {subtitle.text}
+            </div>
+          {/each}
+        </div>
+      {/if}
+
+      <!-- Loading indicator -->
+      {#if isStartingStream}
+        <div class="absolute inset-0 flex items-center justify-center bg-black/50">
+          <div class="text-white text-center">
+            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
+            <p>WebRTC接続中...</p>
+          </div>
+        </div>
+      {/if}
+    {:else}
+      <div class="flex items-center justify-center h-full text-gray-500">
+        <p class="text-xl">チャンネルを選択してください</p>
+      </div>
+    {/if}
+  </div>
 </div>

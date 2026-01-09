@@ -2,81 +2,102 @@
   import VideoPlayer from './components/VideoPlayer.svelte'
   import ChannelList from './components/ChannelList.svelte'
   import ProgramGuide from './components/ProgramGuide.svelte'
-  import DebugLogs from './components/DebugLogs.svelte'
-  
+  import OverlayPanel from './components/OverlayPanel.svelte'
+  import MetaBar from './components/MetaBar.svelte'
+  import SettingsPanel from './components/SettingsPanel.svelte'
+  import EPGGrid from './components/EPGGrid.svelte'
+  import type { ConnectionStatus } from './lib/webrtc/types'
+
   let selectedChannel: any = null
-  let showDebug: boolean = false
+  let showChannelPanel = false
+  let showSettingsPanel = false
+  let showEPGPanel = false
   let debugLogs: string[] = []
   let ffmpegLogs: string[] = []
+  let connectionStatus: ConnectionStatus = 'disconnected'
+  let streamStarted = false
+
+  function handleChannelSelect() {
+    showChannelPanel = false
+  }
+
+  function handleEPGSelect(event: CustomEvent) {
+    selectedChannel = event.detail
+    showEPGPanel = false
+  }
 </script>
 
-<main class="min-h-screen bg-gray-900 text-white">
+<div class="min-h-screen bg-gray-900 text-white flex flex-col">
   <!-- Compact header -->
-  <header class="flex justify-between items-center px-4 py-2 bg-gray-800 border-b border-gray-700 h-14">
-    <h1 class="text-xl font-bold">TV Viewer</h1>
-    <button 
-      class="px-3 py-1 text-sm bg-blue-600 text-white rounded hover:bg-blue-700 transition-colors"
-      on:click={() => showDebug = !showDebug}
-    >
-      {showDebug ? 'Debug OFF' : 'Debug ON'}
-    </button>
+  <header class="h-12 flex items-center justify-between px-4 bg-gray-800/80 backdrop-blur border-b border-gray-700 z-20">
+    <div class="font-bold text-lg">TV Viewer</div>
+    <div class="flex items-center gap-2">
+      <button
+        class="flex items-center gap-1 px-3 py-1.5 text-sm rounded hover:bg-gray-700 transition-colors"
+        on:click={() => showEPGPanel = true}
+      >
+        <!-- Grid/Table icon -->
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
+        </svg>
+        <span class="hidden sm:inline">番組表</span>
+      </button>
+      <button
+        class="flex items-center gap-1 px-3 py-1.5 text-sm rounded hover:bg-gray-700 transition-colors"
+        on:click={() => showChannelPanel = true}
+      >
+        <!-- TV icon -->
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
+        </svg>
+        <span class="hidden sm:inline">チャンネル</span>
+      </button>
+    </div>
   </header>
-  
-  <!-- Main content area with CSS Grid -->
-  <main class="grid gap-4 p-4" style="height: calc(100vh - 3.5rem);">
-    <div class="
-      grid gap-4 h-full
-      grid-cols-1 grid-rows-[auto_1fr_1fr] sm:grid-rows-[auto_1fr_1fr] 
-      md:grid-cols-[2fr_1fr] md:grid-rows-[auto_1fr]
-      lg:grid-cols-[65fr_35fr] lg:grid-rows-[auto_1fr]
-      xl:grid-cols-[70fr_30fr]
-      max-w-[1600px] mx-auto w-full
-    ">
-      
-      <!-- Video player container with size constraints -->
-      <div class="
-        row-start-1 col-start-1 
-        md:row-start-1 md:col-start-1 md:row-span-2
-        min-h-0 flex flex-col
-      ">
-        <div class="
-          w-full h-full max-h-[70vh] 
-          md:max-h-[calc(100vh-7rem)] 
-          flex flex-col justify-center
-        ">
-          <VideoPlayer {selectedChannel} bind:debugLogs bind:ffmpegLogs />
-        </div>
-      </div>
-      
-      <!-- Information panel container -->
-      <div class="
-        row-start-2 col-start-1
-        md:row-start-1 md:col-start-2 md:row-span-2
-        min-h-0 flex flex-col gap-4 h-full
-      ">
-        {#if showDebug}
-          <!-- Debug logs view -->
-          <div class="h-full min-h-0">
-            <DebugLogs bind:debugLogs bind:ffmpegLogs {selectedChannel} streamStarted={true} />
-          </div>
-        {:else}
-          <!-- Channel list -->
-          <div class="
-            flex-1 min-h-0
-            h-64 md:h-auto md:flex-[3]
-          ">
-            <ChannelList bind:selectedChannel />
-          </div>
-          
-          <!-- Program guide -->
-          <div class="
-            flex-1 min-h-0
-            h-64 md:h-auto md:flex-[2]
-          ">
-            <ProgramGuide channel={selectedChannel} />
-          </div>
-        {/if}
-      </div>
+
+  <!-- Main content (video player) - theater mode -->
+  <main class="flex-1 flex flex-col pb-12 bg-black">
+    <div class="flex-1 flex items-center justify-center">
+      <VideoPlayer
+        bind:selectedChannel
+        bind:debugLogs
+        bind:ffmpegLogs
+        bind:connectionStatus
+        bind:streamStarted
+      />
     </div>
   </main>
-</main>
+
+  <!-- Bottom meta bar -->
+  <MetaBar
+    channel={selectedChannel}
+    {connectionStatus}
+    on:channelClick={() => showChannelPanel = true}
+    on:settingsClick={() => showSettingsPanel = true}
+  />
+
+  <!-- Channel selection overlay -->
+  <OverlayPanel bind:isOpen={showChannelPanel} title="チャンネル選択">
+    <div class="space-y-4">
+      <ChannelList bind:selectedChannel on:select={handleChannelSelect} />
+      <div class="border-t border-gray-700 pt-4">
+        <ProgramGuide channel={selectedChannel} />
+      </div>
+    </div>
+  </OverlayPanel>
+
+  <!-- Settings overlay -->
+  <OverlayPanel bind:isOpen={showSettingsPanel} title="設定">
+    <SettingsPanel
+      {selectedChannel}
+      bind:debugLogs
+      bind:ffmpegLogs
+      {streamStarted}
+    />
+  </OverlayPanel>
+
+  <!-- EPG (Program Guide Grid) overlay -->
+  <OverlayPanel bind:isOpen={showEPGPanel} title="番組表" fullWidth={true}>
+    <EPGGrid on:select={handleEPGSelect} />
+  </OverlayPanel>
+</div>

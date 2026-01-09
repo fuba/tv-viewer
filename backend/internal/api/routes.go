@@ -2,25 +2,40 @@ package api
 
 import (
 	"database/sql"
-	"fmt"
-	"io"
+	"encoding/json"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
-	"path/filepath"
+	"sort"
 	"strconv"
+	"time"
 
 	"github.com/fuba/tv-viewer/internal/encoder"
 	"github.com/fuba/tv-viewer/internal/mirakurun"
+	"github.com/fuba/tv-viewer/internal/wsmonitor"
 	"github.com/gin-gonic/gin"
+	"github.com/gorilla/websocket"
 )
 
 var (
 	encoderInstance = encoder.New()
+	wsHub           *wsmonitor.Hub
+	wsUpgrader      = websocket.Upgrader{
+		ReadBufferSize:  1024,
+		WriteBufferSize: 1024,
+		CheckOrigin: func(r *http.Request) bool {
+			return true // Allow all origins for development
+		},
+	}
 )
 
 func SetupRoutes(router *gin.Engine, db *sql.DB) {
+	// Initialize WebSocket hub for session monitoring
+	wsHub = wsmonitor.NewHub(encoderInstance)
+	go wsHub.Run()
+	log.Println("[wsmonitor] WebSocket hub started")
+
 	// CORS middleware
 	router.Use(func(c *gin.Context) {
 		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
@@ -106,22 +121,33 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 
 		// Channels
 		api.GET("/channels", getChannels(db))
-		api.GET("/channels/:id/stream", streamChannel(db))
 
 		// Programs
 		api.GET("/programs", getPrograms(db))
 
-		// Streaming
-		api.GET("/stream/:channel/playlist.m3u8", getPlaylist(db))
-		api.GET("/stream/:channel/subtitles.ass", getSubtitles(db))
-		api.GET("/stream/:channel/:segment", getSegment(db))
+		// EPG (Electronic Program Guide) - all channels program grid
+		api.GET("/epg", getEPG(db))
+
 		
-		// Stream selection
+		// Stream selection (for debugging - shows current encoder stream info)
 		api.GET("/channels/:id/stream-info", getStreamInfo(db))
-		api.POST("/channels/:id/select-streams", selectStreams(db))
-		
-		// CS channel service-specific streaming
-		api.GET("/channels/CS/:id/service/:serviceId/stream", streamCSService(db))
+
+		// Tuner status
+		api.GET("/tuners", getTuners())
+
+		// WebSocket endpoint for session monitoring
+		api.GET("/ws/session/:sessionId", handleWebSocket)
+
+		// WebSocket status (for debugging)
+		api.GET("/ws/status", func(c *gin.Context) {
+			c.JSON(http.StatusOK, gin.H{
+				"connected_sessions": wsHub.GetConnectedSessionCount(),
+				"sessions":           wsHub.GetConnectedSessions(),
+			})
+		})
+
+		// WebRTC routes
+		SetupWebRTCRoutes(api)
 	}
 
 	// Health check for root
@@ -171,125 +197,6 @@ func getChannels(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
-func streamChannel(db *sql.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		channelID, err := url.QueryUnescape(c.Param("id"))
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid channel ID encoding",
-			})
-			return
-		}
-		
-		mirakurunURL := os.Getenv("MIRAKURUN_URL")
-		if mirakurunURL == "" {
-			mirakurunURL = "http://tuner:40772"
-		}
-		
-		// First, get channel info to determine type
-		client := mirakurun.NewClient(mirakurunURL)
-		channels, err := client.GetChannels()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to get channels",
-			})
-			return
-		}
-		
-		// Find the channel type and first service ID
-		var channelType string
-		var firstServiceID int64
-		var isCSChannel bool
-
-		log.Printf("Looking for channel %s in %d channels", channelID, len(channels))
-
-		for _, ch := range channels {
-			log.Printf("Checking channel: %s (type: %s) against %s", ch.Channel, ch.Type, channelID)
-			if ch.Channel == channelID {
-				channelType = ch.Type
-				isCSChannel = channelType == "CS"
-				log.Printf("Found matching channel %s, type: %s, isCS: %v, services: %d",
-					channelID, channelType, isCSChannel, len(ch.Services))
-
-				// Get the first service ID for all channel types (not just CS)
-				// This is important because using service-specific URLs ensures we get full-seg (1080p) instead of one-seg (320x180)
-				if len(ch.Services) > 0 {
-					firstServiceID = ch.Services[0].ID
-					log.Printf("Channel %s has %d services, using service ID %d (%s)",
-						channelID, len(ch.Services), firstServiceID, ch.Services[0].Name)
-				}
-				break
-			}
-		}
-		
-		if channelType == "" {
-			log.Printf("Channel %s not found in channels list", channelID)
-			c.JSON(http.StatusNotFound, gin.H{
-				"error": "Channel not found",
-			})
-			return
-		}
-		
-		log.Printf("Streaming channel %s with type %s", channelID, channelType)
-
-		var stream io.ReadCloser
-		// Use service-specific streaming when available to ensure full-seg quality
-		if firstServiceID != 0 {
-			stream, err = client.GetServiceStream(firstServiceID)
-			if err != nil {
-				log.Printf("Failed to get service stream for channel %s service %d: %v, falling back to channel stream", channelID, firstServiceID, err)
-				// Fall back to channel stream
-				stream, err = client.GetChannelStreamWithType(channelType, channelID)
-			} else {
-				log.Printf("Successfully got service stream for channel %s (service ID: %d)", channelID, firstServiceID)
-			}
-		} else {
-			// Fall back to channel streaming if no service ID available
-			log.Printf("No service ID available for channel %s, using channel stream", channelID)
-			stream, err = client.GetChannelStreamWithType(channelType, channelID)
-		}
-		
-		if err != nil {
-			log.Printf("Failed to get stream for channel %s (type %s): %v", channelID, channelType, err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to get channel stream",
-				"details": err.Error(),
-			})
-			return
-		}
-		// Note: Do NOT defer stream.Close() here as the encoder needs to manage the stream
-
-		// Build the stream URL for direct ffmpeg connection and stream analysis
-		// Use service-specific URL when available to ensure we get full-seg (1080p) instead of one-seg (320x180)
-		var streamURL string
-		if firstServiceID != 0 {
-			streamURL = fmt.Sprintf("%s/api/services/%d/stream", mirakurunURL, firstServiceID)
-			log.Printf("Using service-specific URL for stream analysis: %s", streamURL)
-		} else {
-			streamURL = fmt.Sprintf("%s/api/channels/%s/%s/stream", mirakurunURL, channelType, channelID)
-			log.Printf("Using channel URL for stream analysis: %s", streamURL)
-		}
-
-		// Start encoding with stream URL for potential stream analysis
-		session, err := encoderInstance.StartEncodingWithStreamSelection(channelID, stream, streamURL, -1, -1)
-		if err != nil {
-			stream.Close() // Only close on error
-			log.Printf("Failed to start encoding for channel %s: %v", channelID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to start encoding",
-				"details": err.Error(),
-			})
-			return
-		}
-		
-		c.JSON(http.StatusOK, gin.H{
-			"status": "streaming",
-			"sessionId": session.ID,
-			"playlistUrl": "/api/stream/" + channelID + "/playlist.m3u8",
-		})
-	}
-}
-
 func getPrograms(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
 		serviceIDStr := c.Query("serviceId")
@@ -326,72 +233,190 @@ func getPrograms(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
-func getPlaylist(db *sql.DB) gin.HandlerFunc {
+// EPGChannel represents a channel with its programs for EPG display
+type EPGChannel struct {
+	Channel   string              `json:"channel"`
+	Type      string              `json:"type"`
+	ServiceID int64               `json:"serviceId"`
+	Name      string              `json:"name"`
+	Programs  []mirakurun.Program `json:"programs"`
+}
+
+// EPGResponse represents the EPG API response
+type EPGResponse struct {
+	Channels  []EPGChannel `json:"channels"`
+	TimeRange struct {
+		From int64 `json:"from"`
+		To   int64 `json:"to"`
+	} `json:"timeRange"`
+}
+
+func getEPG(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		channelID, err := url.QueryUnescape(c.Param("channel"))
+		mirakurunURL := os.Getenv("MIRAKURUN_URL")
+		if mirakurunURL == "" {
+			mirakurunURL = "http://tuner:40772"
+		}
+
+		client := mirakurun.NewClient(mirakurunURL)
+
+		// Get query parameters
+		channelType := c.Query("type") // GR, BS, CS (optional)
+		hoursStr := c.DefaultQuery("hours", "24")
+		hours, err := strconv.Atoi(hoursStr)
+		if err != nil || hours < 1 || hours > 168 {
+			hours = 24
+		}
+
+		// Calculate time range
+		now := time.Now()
+		fromTime := now.Add(-1 * time.Hour).UnixMilli() // Start 1 hour before now
+		toTime := now.Add(time.Duration(hours) * time.Hour).UnixMilli()
+
+		// Get all channels
+		channels, err := client.GetChannels()
 		if err != nil {
-			c.Status(http.StatusBadRequest)
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to fetch channels",
+			})
 			return
 		}
-		playlistPath := encoderInstance.GetPlaylistPath(channelID)
-		log.Printf("Looking for playlist at: %s", playlistPath)
-		
-		// Check if playlist exists
-		if _, err := os.Stat(playlistPath); os.IsNotExist(err) {
-			log.Printf("Playlist not found: %s (error: %v)", playlistPath, err)
-			c.Status(http.StatusNotFound)
+
+		// Get all programs
+		allPrograms, err := client.GetAllPrograms()
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error": "Failed to fetch programs",
+			})
 			return
 		}
-		
-		c.File(playlistPath)
+
+		// Group programs by serviceId
+		programsByService := make(map[int][]mirakurun.Program)
+		for _, p := range allPrograms {
+			// Filter by time range
+			programEnd := p.StartAt + int64(p.Duration)
+			if programEnd < fromTime || p.StartAt > toTime {
+				continue
+			}
+			programsByService[p.ServiceID] = append(programsByService[p.ServiceID], p)
+		}
+
+		// Sort programs within each service by start time
+		for serviceID := range programsByService {
+			sort.Slice(programsByService[serviceID], func(i, j int) bool {
+				return programsByService[serviceID][i].StartAt < programsByService[serviceID][j].StartAt
+			})
+		}
+
+		// Build EPG response
+		var epgChannels []EPGChannel
+		for _, ch := range channels {
+			// Filter by channel type if specified
+			if channelType != "" && ch.Type != channelType {
+				continue
+			}
+
+			// Process each service in the channel
+			for _, svc := range ch.Services {
+				programs := programsByService[svc.ServiceID]
+				if len(programs) == 0 {
+					continue // Skip channels with no programs
+				}
+
+				epgChannels = append(epgChannels, EPGChannel{
+					Channel:   ch.Channel,
+					Type:      ch.Type,
+					ServiceID: svc.ID,
+					Name:      svc.Name,
+					Programs:  programs,
+				})
+			}
+		}
+
+		// Sort channels by type and name
+		sort.Slice(epgChannels, func(i, j int) bool {
+			if epgChannels[i].Type != epgChannels[j].Type {
+				typeOrder := map[string]int{"GR": 0, "BS": 1, "CS": 2}
+				return typeOrder[epgChannels[i].Type] < typeOrder[epgChannels[j].Type]
+			}
+			return epgChannels[i].Name < epgChannels[j].Name
+		})
+
+		response := EPGResponse{
+			Channels: epgChannels,
+		}
+		response.TimeRange.From = fromTime
+		response.TimeRange.To = toTime
+
+		c.JSON(http.StatusOK, response)
 	}
 }
 
-func getSubtitles(db *sql.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		channelID, err := url.QueryUnescape(c.Param("channel"))
-		if err != nil {
-			c.Status(http.StatusBadRequest)
-			return
-		}
-		subtitlePath := encoderInstance.GetSubtitlePath(channelID)
-		
-		// Check if subtitle file exists
-		if _, err := os.Stat(subtitlePath); os.IsNotExist(err) {
-			// Return empty ASS file if no subtitles
-			c.Header("Content-Type", "text/plain; charset=utf-8")
-			c.String(http.StatusOK, "[Script Info]\nTitle: Empty\n\n[V4+ Styles]\n\n[Events]\n")
-			return
-		}
-		
-		c.File(subtitlePath)
-	}
+// TunerStatus represents the status of tuners by type
+type TunerStatus struct {
+	Type  string `json:"type"`
+	Total int    `json:"total"`
+	Using int    `json:"using"`
+	Free  int    `json:"free"`
 }
 
-func getSegment(db *sql.DB) gin.HandlerFunc {
+func getTuners() gin.HandlerFunc {
 	return func(c *gin.Context) {
-		channelID, err := url.QueryUnescape(c.Param("channel"))
+		mirakurunURL := os.Getenv("MIRAKURUN_URL")
+		if mirakurunURL == "" {
+			mirakurunURL = "http://tuner:40772"
+		}
+
+		resp, err := http.Get(mirakurunURL + "/api/tuners")
 		if err != nil {
-			c.Status(http.StatusBadRequest)
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tuners"})
 			return
 		}
-		segment := c.Param("segment")
-		
-		segmentPath := filepath.Join("stream", channelID, segment)
-		
-		// Debug: log the requested path
-		log.Printf("Serving segment: %s (channel: %s, segment: %s)", segmentPath, channelID, segment)
-		
-		// Check if segment exists
-		if _, err := os.Stat(segmentPath); os.IsNotExist(err) {
-			log.Printf("Segment not found: %s", segmentPath)
-			c.Status(http.StatusNotFound)
+		defer resp.Body.Close()
+
+		var tuners []struct {
+			Types   []string `json:"types"`
+			IsUsing bool     `json:"isUsing"`
+			IsFree  bool     `json:"isFree"`
+		}
+
+		if err := json.NewDecoder(resp.Body).Decode(&tuners); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse tuners"})
 			return
 		}
-		
-		// Set proper content type for TS files
-		c.Header("Content-Type", "video/mp2t")
-		c.File(segmentPath)
+
+		// Group by type
+		typeMap := make(map[string]*TunerStatus)
+		for _, t := range tuners {
+			// Create a key from types (e.g., "GR" or "BS/CS")
+			typeKey := ""
+			for i, tp := range t.Types {
+				if i > 0 {
+					typeKey += "/"
+				}
+				typeKey += tp
+			}
+
+			if _, ok := typeMap[typeKey]; !ok {
+				typeMap[typeKey] = &TunerStatus{Type: typeKey}
+			}
+			typeMap[typeKey].Total++
+			if t.IsUsing {
+				typeMap[typeKey].Using++
+			}
+			if t.IsFree {
+				typeMap[typeKey].Free++
+			}
+		}
+
+		// Convert to slice
+		result := make([]TunerStatus, 0, len(typeMap))
+		for _, v := range typeMap {
+			result = append(result, *v)
+		}
+
+		c.JSON(http.StatusOK, result)
 	}
 }
 
@@ -418,101 +443,24 @@ func getStreamInfo(db *sql.DB) gin.HandlerFunc {
 	}
 }
 
-func selectStreams(db *sql.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		channelID, err := url.QueryUnescape(c.Param("id"))
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid channel ID encoding",
-			})
-			return
-		}
-		
-		var req struct {
-			VideoStreamIndex int `json:"video_stream_index"`
-			AudioStreamIndex int `json:"audio_stream_index"`
-		}
-		if err := c.ShouldBindJSON(&req); err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
-			return
-		}
-		
-		// Update stream selection
-		if err := encoderInstance.UpdateStreamSelection(channelID, req.VideoStreamIndex, req.AudioStreamIndex); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": err.Error(),
-			})
-			return
-		}
-		
-		c.JSON(http.StatusOK, gin.H{
-			"status": "updated",
-			"video_stream_index": req.VideoStreamIndex,
-			"audio_stream_index": req.AudioStreamIndex,
-		})
+// handleWebSocket handles WebSocket connections for session monitoring
+func handleWebSocket(c *gin.Context) {
+	sessionID, err := url.QueryUnescape(c.Param("sessionId"))
+	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
+		return
 	}
-}
 
-func streamCSService(db *sql.DB) gin.HandlerFunc {
-	return func(c *gin.Context) {
-		channelID, err := url.QueryUnescape(c.Param("id"))
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid channel ID encoding",
-			})
-			return
-		}
-		
-		serviceIDStr := c.Param("serviceId")
-		serviceID, err := strconv.ParseInt(serviceIDStr, 10, 64)
-		if err != nil {
-			c.JSON(http.StatusBadRequest, gin.H{
-				"error": "Invalid service ID",
-			})
-			return
-		}
-		
-		mirakurunURL := os.Getenv("MIRAKURUN_URL")
-		if mirakurunURL == "" {
-			mirakurunURL = "http://tuner:40772"
-		}
-		
-		client := mirakurun.NewClient(mirakurunURL)
-		
-		log.Printf("CS Service streaming: channel=%s, serviceID=%d", channelID, serviceID)
-		
-		// Direct service streaming
-		stream, err := client.GetServiceStream(serviceID)
-		if err != nil {
-			log.Printf("Failed to get service stream %d for CS channel %s: %v", serviceID, channelID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to get service stream",
-				"details": err.Error(),
-			})
-			return
-		}
-		
-		// Build service-specific stream URL
-		streamURL := fmt.Sprintf("%s/api/services/%d/stream", mirakurunURL, serviceID)
-		
-		// Start encoding with service-specific naming
-		sessionID := fmt.Sprintf("CS%s_S%d", channelID, serviceID)
-		session, err := encoderInstance.StartEncodingWithStreamSelection(sessionID, stream, streamURL, -1, -1)
-		if err != nil {
-			stream.Close()
-			log.Printf("Failed to start encoding for CS service %d: %v", serviceID, err)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to start encoding",
-				"details": err.Error(),
-			})
-			return
-		}
-		
-		c.JSON(http.StatusOK, gin.H{
-			"status": "streaming",
-			"sessionId": session.ID,
-			"serviceId": serviceID,
-			"playlistUrl": fmt.Sprintf("/api/stream/%s/playlist.m3u8", sessionID),
-		})
+	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
+	if err != nil {
+		log.Printf("[wsmonitor] WebSocket upgrade failed for session %s: %v", sessionID, err)
+		return
 	}
+
+	client := wsmonitor.NewClient(wsHub, conn, sessionID)
+	wsHub.Register(client)
+
+	// Start read/write pumps in goroutines
+	go client.WritePump()
+	go client.ReadPump()
 }

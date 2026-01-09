@@ -42,7 +42,7 @@ backend/
 │   │   ├── routes.go               # RESTful APIエンドポイント
 │   │   └── webrtc_routes.go        # WebRTCシグナリングエンドポイント
 │   ├── encoder/
-│   │   ├── encoder.go              # HLSエンコーダー (レガシー)
+│   │   ├── encoder.go              # エンコーダー基盤（NVENC管理等）
 │   │   ├── webrtc_encoder.go       # WebRTC用エンコーダー
 │   │   ├── nvenc.go                # NVIDIA NVENC GPU エンコーディング
 │   │   ├── stream_info.go          # ストリーム情報解析 (ffprobe)
@@ -66,16 +66,20 @@ frontend/src/
 ├── main.ts                          # エントリーポイント
 ├── App.svelte                       # ルートコンポーネント
 ├── lib/
-│   └── webrtc/                      # WebRTC v2 クライアント
-│       ├── RTCClient.ts             # WebRTC接続管理
-│       └── types.ts                 # 型定義
+│   ├── webrtc/                      # WebRTC クライアント
+│   │   ├── RTCClient.ts             # WebRTC接続管理
+│   │   └── types.ts                 # 型定義
+│   └── types/
+│       └── epg.ts                   # EPG型定義
 └── components/
-    ├── VideoPlayer.svelte           # WebRTC再生 (v2)
+    ├── VideoPlayer.svelte           # WebRTC再生
     ├── ChannelList.svelte           # チャンネル一覧 (GR/BS/CSタブ)
+    ├── EPGGrid.svelte               # 番組表グリッド (ラテ欄)
     ├── ProgramGuide.svelte          # 番組表表示
-    ├── StreamSelector.svelte        # ストリーム選択UI
-    ├── SubtitleRenderer.svelte      # 字幕レンダリング
-    └── DebugLogs.svelte             # FFmpegログ表示
+    ├── MetaBar.svelte               # 接続状態表示バー
+    ├── OverlayPanel.svelte          # オーバーレイパネルUI
+    ├── SettingsPanel.svelte         # 設定パネル
+    └── TunerStatus.svelte           # チューナー状態表示
 ```
 
 ## WebRTC v2 データフロー

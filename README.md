@@ -4,61 +4,57 @@
 
 ## 概要
 
-このプロジェクトは、Mirakurunを使用して日本のデジタルテレビ放送を受信し、Webブラウザでリアルタイム視聴を可能にするシステムです。MPEG2-TSストリームをHLS（HTTP Live Streaming）形式に変換し、HLS.jsを使用してブラウザで再生します。
+このプロジェクトは、Mirakurunを使用して日本のデジタルテレビ放送を受信し、Webブラウザでリアルタイム視聴を可能にするシステムです。MPEG2-TSストリームをWebRTC経由で低遅延配信します。
 
 ## 主要機能
 
-### ✅ 実装済み機能
+### 実装済み機能
 
 - **📺 リアルタイム視聴**
   - 地上波デジタル放送対応
-  - BSデジタル放送対応（28チャンネル）
-  - 🆕 **CSデジタル放送対応（50サービス）**
-  - リアルタイムMPEG2-TS → HLS変換
+  - BSデジタル放送対応
+  - CSデジタル放送対応
+  - WebRTCによる低遅延ストリーミング
   - NVENC/H.264ハードウェアエンコーディング
 
 - **🎮 ユーザーインターフェース**
   - モダンなWebUI（Svelte + Tailwind CSS）
-  - 📱 **レスポンシブデザイン（モバイル・タブレット対応）**
+  - レスポンシブデザイン（モバイル・タブレット対応）
+  - **番組表（EPGグリッド）** - 新聞のラテ欄スタイル
   - タブ切り替えチャンネル選択（地上波・BS・CS）
-  - 放送局名の正確な表示（TBSチャンネル1、フジテレビONEなど）
-  - タイプ別カラーコーディング（地上波：緑、BS：青、🆕 CS：紫）
-  - 🆕 **iPhoneインライン再生対応**
-  - 🆕 **ストリーム選択UI（映像・音声トラック切り替え）**
+  - オーバーレイパネルUI
+  - チューナー状態表示
 
-- **🔧 デバッグ・監視機能**
-  - 🆕 **改善されたデバッグUI**（専用ログパネル）
+- **🔧 監視機能**
+  - WebSocket接続状態監視
+  - チューナーリーク防止（接続タイムアウト処理）
   - FFmpegリアルタイムログ表示
-  - エンコーディングプロセス監視
   - API健全性チェック
-  - アプリケーションログとFFmpegログの分離表示
 
 - **⚡ パフォーマンス**
-  - 最適化されたFFmpeg設定
-  - 🆕 **CS放送高速分析**（20秒 → 0.5秒）
-  - 効率的なHLSセグメント管理（2秒セグメント）
-  - 🆕 **複数チャンネル同時エンコーディング**（最大3ch）
-  - NVENC（RTX 3080）ハードウェア加速対応
+  - WebRTCによる低遅延配信（2-3秒）
+  - NVENC（NVIDIA GPU）ハードウェア加速
+  - 効率的なH.264/Opusエンコーディング
 
 ## 技術スタック
 
 ### バックエンド
 - **Go 1.21**: 高性能なAPIサーバー
 - **Gin Framework**: RESTful API
-- **FFmpeg**: MPEG2-TS → HLS エンコーディング
+- **Pion WebRTC**: WebRTCサーバー実装
+- **FFmpeg**: H.264/Opus エンコーディング
 - **SQLite**: 設定・データ管理
 
 ### フロントエンド
 - **Svelte**: モダンなWebフレームワーク
 - **TypeScript**: 型安全な開発
 - **Tailwind CSS**: ユーティリティファーストCSS
-- **HLS.js**: ブラウザHLS再生
+- **WebRTC API**: 低遅延ビデオ再生
 
 ### インフラ
 - **Docker & Docker Compose**: コンテナ化
 - **NVIDIA Container Toolkit**: GPU コンテナサポート
 - **Nginx**: リバースプロキシ
-- **Host Networking**: 低レイテンシー通信
 - **NVENC**: NVIDIA GPUハードウェアエンコーディング
 
 ## システム構成
@@ -66,10 +62,10 @@
 ```
 ┌─────────────────┐    ┌──────────────────┐    ┌─────────────────┐
 │   Mirakurun     │───▶│   TV Viewer      │───▶│  Web Browser    │
-│  (TV Tuner)     │    │   Backend        │    │   (HLS.js)      │
+│  (TV Tuner)     │    │   Backend        │    │   (WebRTC)      │
 │                 │    │                  │    │                 │
 │ MPEG2-TS Stream │    │ Go + FFmpeg      │    │ Svelte Frontend │
-└─────────────────┘    │ HLS Transcoding  │    └─────────────────┘
+└─────────────────┘    │ WebRTC Server    │    └─────────────────┘
                        └──────────────────┘
 ```
 
@@ -87,22 +83,20 @@
 git clone <your-repo-url>
 cd tv-viewer
 
-# コンテナをビルド・起動
+# コンテナをビルド・起動（GPU対応）
 docker compose up -d
 
-# GPU搭載システムでNVENCを使用する場合
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-
 # フロントエンドにアクセス
-open http://localhost:3001
+open http://localhost:18090
 ```
 
 ### 環境変数
 
 ```bash
-# docker-compose.yml で設定済み
-MIRAKURUN_URL=http://localhost:40772
+# docker-compose.yml で設定
+MIRAKURUN_URL=http://tuner:40772
 PORT=18088
+ENCODING_QUALITY=medium  # high/medium/low
 ```
 
 ## API仕様
@@ -113,10 +107,19 @@ PORT=18088
 |--------|----------|------|
 | GET | `/api/health` | 健全性チェック |
 | GET | `/api/channels` | チャンネル一覧取得 |
-| GET | `/api/channels/{id}/stream` | ストリーミング開始 |
+| GET | `/api/programs?serviceId={id}` | 番組情報取得 |
+| GET | `/api/epg` | EPGデータ取得（全チャンネル） |
+| GET | `/api/tuners` | チューナー状態取得 |
 | GET | `/api/logs/{channel}` | FFmpegログ取得 |
 | GET | `/api/sessions` | アクティブセッション一覧 |
 | POST | `/api/sessions/stop-all` | 全セッション停止 |
+
+### WebRTC
+
+| Method | Endpoint | 説明 |
+|--------|----------|------|
+| WS | `/api/ws/webrtc/{channelId}` | WebRTCシグナリング |
+| GET | `/api/webrtc/status` | WebRTC接続状態 |
 
 ### NVENC ハードウェアエンコーディング
 
@@ -125,69 +128,20 @@ PORT=18088
 | GET | `/api/nvenc/status` | NVENCステータス確認 |
 | POST | `/api/nvenc/toggle` | NVENC有効/無効切替 |
 
-### HLSストリーミング
-
-| Method | Endpoint | 説明 |
-|--------|----------|------|
-| GET | `/api/stream/{channel}/playlist.m3u8` | HLSプレイリスト |
-| GET | `/api/stream/{channel}/segment{n}.ts` | HLSセグメント |
-| GET | `/api/stream/{channel}/subtitles.ass` | 字幕ファイル |
-
-### ストリーム選択
-
-| Method | Endpoint | 説明 |
-|--------|----------|------|
-| GET | `/api/channels/{id}/stream-info` | ストリーム情報取得 |
-| POST | `/api/channels/{id}/select-streams` | ストリーム選択変更 |
-
 ## NVENC ハードウェアエンコーディング
 
 ### 機能
 - **NVIDIA GPU 自動検出**: RTX/GTX シリーズで自動有効化
-- **コーデック選択**: H.264 または H.265(HEVC)
-- **品質設定**: High/Medium/Low プリセット
-- **CPU 負荷減**: 15-30% → 10-12% にCPU使用率削減
-
-### 使用方法
-
-```bash
-# GPU対応で起動
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-
-# NVENC ステータス確認
-curl http://localhost:18088/api/nvenc/status
-
-# H.265 を有効にする場合
-export USE_HEVC=true
-docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
-```
+- **低遅延チューニング**: WebRTC向け最適化
+- **CPU 負荷軽減**: ハードウェアエンコードによる効率化
 
 ### パフォーマンス
 
-| 項目 | CPUエンコード | NVENC H.264 | NVENC H.265 |
-|------|------------------|-------------|-------------|
-| CPU使用率 | 15-30% | 10-12% | 10-12% |
-| GPU使用率 | 0% | 1-5% | 1-5% |
-| GPUメモリ | 0MB | 272MB | 330MB |
-| 圧縮効率 | 基準 | 基準 | +15-25% |
-| 画質 | 高 | 高 | 最高 |
-
-## ストリーム選択機能
-
-### 概要
-デジタル放送には複数の映像・音声トラックが含まれていることがあります。本機能により、視聴中にリアルタイムでトラックを切り替えることができます。
-
-### 使用方法
-1. チャンネルを選択してストリーミングを開始
-2. 「ストリーム選択」ボタンをクリック
-3. ドロップダウンメニューから希望の映像・音声トラックを選択
-4. 「ストリームを切り替え」ボタンで適用
-
-### 機能詳細
-- **映像ストリーム**: 解像度、ビットレート、言語情報を表示
-- **音声ストリーム**: チャンネル数、サンプリングレート、ビットレート、言語を表示
-- **自動選択**: デフォルトでは最初のトラックを自動選択
-- **リアルタイム切り替え**: 選択変更時にストリームを再起動して即座に反映
+| 項目 | CPUエンコード | NVENC H.264 |
+|------|------------------|-------------|
+| CPU使用率 | 15-30% | 10-12% |
+| GPU使用率 | 0% | 1-5% |
+| 遅延 | 3-5秒 | 2-3秒 |
 
 ## 対応チャンネル
 
@@ -196,36 +150,34 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml up -d
 - 日本テレビ、テレビ朝日、TBS、テレビ東京、フジテレビ
 - その他地域局
 
-### BSデジタル放送（28チャンネル）
+### BSデジタル放送
 - NHK BS、NHK BS プレミアム
 - BS朝日、BS-TBS、BSテレ東、BSフジ
 - BS日テレ、その他専門チャンネル
 
-### 制限事項
-- CSチャンネルは現在無効化（セグメンテーション違反回避）
-- 同時エンコーディング数制限（デフォルト：1）
+### CSデジタル放送
+- 各種専門チャンネル対応
 
 ## トラブルシューティング
 
 ### よくある問題
 
-**問題**: `playlist not ready` エラー
+**問題**: WebRTC接続が確立しない
 ```bash
-# FFmpeg解析時間の調整で解決済み
-# analyzeduration: 地上波5秒、BS10秒に最適化
+# WebSocket接続を確認
+# ブラウザの開発者ツールでNetworkタブを確認
 ```
 
-**問題**: `Invalid frame dimensions 0x0`
+**問題**: 映像が表示されない
 ```bash
-# 正常動作: 日本のデジタル放送の初期化時の一時的現象
-# 数秒後に正常なエンコーディングが開始されます
+# FFmpegログを確認
+docker logs tv-viewer-backend-1 -f
 ```
 
-**問題**: Docker コンテナが起動しない
+**問題**: チューナーがリークする
 ```bash
-# ポート競合確認
-docker compose logs
-netstat -tlnp | grep :3001
+# WebSocket接続タイムアウト設定を確認
+# 自動的に30秒後にチューナー解放
 ```
 
 ### ログ確認
@@ -234,16 +186,9 @@ netstat -tlnp | grep :3001
 # バックエンドログ
 docker logs tv-viewer-backend-1 -f
 
-# フロントエンドログ  
+# フロントエンドログ
 docker logs tv-viewer-frontend-1 -f
-
-# FFmpegログ（ブラウザ内）
-# デバッグモードを有効にして確認
 ```
-
-## 開発履歴
-
-詳細な開発履歴と実装ノートは [DEVELOPMENT.md](DEVELOPMENT.md) を参照してください。
 
 ## ライセンス
 
@@ -253,4 +198,4 @@ This project is licensed under CC0 (Creative Commons Zero).
 
 - [Mirakurun](https://github.com/Chinachu/Mirakurun) - デジタル放送受信
 - [FFmpeg](https://ffmpeg.org/) - メディア変換・ストリーミング
-- [HLS.js](https://github.com/video-dev/hls.js/) - ブラウザHLS再生
+- [Pion WebRTC](https://github.com/pion/webrtc) - Go WebRTC実装

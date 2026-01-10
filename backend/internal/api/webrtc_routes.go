@@ -317,7 +317,27 @@ func handleWebRTCSignaling(c *gin.Context) {
 	}
 	defer conn.Close()
 
+	// Mutex for synchronized WebSocket writes (gorilla/websocket doesn't support concurrent writes)
+	var wsMu sync.Mutex
+	safeWrite := func(messageType int, data []byte) error {
+		wsMu.Lock()
+		defer wsMu.Unlock()
+		return conn.WriteMessage(messageType, data)
+	}
+	safeWriteControl := func(messageType int, data []byte, deadline time.Time) error {
+		wsMu.Lock()
+		defer wsMu.Unlock()
+		return conn.WriteControl(messageType, data, deadline)
+	}
+
 	log.Printf("[WebRTC] WebSocket connected for channel %s", channelID)
+
+	// Helper to send error messages safely
+	sendErrorSafe := func(peerID, errorMsg string) {
+		msg := webrtc.NewErrorMessage(peerID, errorMsg)
+		data, _ := msg.ToJSON()
+		safeWrite(1, data)
+	}
 
 	// Set initial read deadline
 	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
@@ -339,7 +359,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 			case <-done:
 				return
 			case <-ticker.C:
-				if err := conn.WriteControl(9, []byte{}, time.Now().Add(5*time.Second)); err != nil {
+				if err := safeWriteControl(9, []byte{}, time.Now().Add(5*time.Second)); err != nil {
 					// Ping failed, connection is likely dead
 					log.Printf("[WebRTC] Ping failed for channel %s: %v", channelID, err)
 					return
@@ -397,7 +417,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 			client := mirakurun.NewClient(mirakurunURL)
 			channels, err := client.GetChannels()
 			if err != nil {
-				sendError(conn, "", "Failed to get channels")
+				sendErrorSafe("", "Failed to get channels")
 				continue
 			}
 
@@ -414,7 +434,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 			}
 
 			if channelType == "" {
-				sendError(conn, "", "Channel not found")
+				sendErrorSafe("", "Channel not found")
 				continue
 			}
 
@@ -429,7 +449,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 			}
 
 			if err != nil {
-				sendError(conn, "", "Failed to get stream: "+err.Error())
+				sendErrorSafe("", "Failed to get stream: "+err.Error())
 				continue
 			}
 
@@ -437,7 +457,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 			session, err = encoderInstance.StartWebRTCEncoding(channelID, stream, streamURL, -1, -1)
 			if err != nil {
 				stream.Close()
-				sendError(conn, "", "Failed to start encoding: "+err.Error())
+				sendErrorSafe("", "Failed to start encoding: "+err.Error())
 				continue
 			}
 
@@ -446,7 +466,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 			if err != nil {
 				session.Stop()
 				session = nil // Clear local variable on failure
-				sendError(conn, "", "Failed to create peer: "+err.Error())
+				sendErrorSafe("", "Failed to create peer: "+err.Error())
 				continue
 			}
 
@@ -463,25 +483,25 @@ func handleWebRTCSignaling(c *gin.Context) {
 				candidateInit := candidate.ToJSON()
 				response := webrtc.NewICECandidateMessage(peer.ID, candidateInit)
 				data, _ := response.ToJSON()
-				conn.WriteMessage(1, data)
+				safeWrite(1, data)
 			})
 
 			// Create offer (server-side offer for push mode)
 			offer, err := peer.PC.CreateOffer(nil)
 			if err != nil {
-				sendError(conn, peer.ID, "Failed to create offer: "+err.Error())
+				sendErrorSafe(peer.ID, "Failed to create offer: "+err.Error())
 				continue
 			}
 
 			if err := peer.PC.SetLocalDescription(offer); err != nil {
-				sendError(conn, peer.ID, "Failed to set local description: "+err.Error())
+				sendErrorSafe(peer.ID, "Failed to set local description: "+err.Error())
 				continue
 			}
 
 			// Send offer to client
 			response := webrtc.NewOfferMessage(peer.ID, offer)
 			data, _ := response.ToJSON()
-			conn.WriteMessage(1, data)
+			safeWrite(1, data)
 
 			// Start streaming video
 			go func() {
@@ -558,13 +578,13 @@ func handleWebRTCSignaling(c *gin.Context) {
 			// Send stream-stopped acknowledgment
 			response := &webrtc.SignalingMessage{Type: webrtc.MsgTypeStreamStopped}
 			data, _ := response.ToJSON()
-			conn.WriteMessage(1, data)
+			safeWrite(1, data)
 			log.Printf("[WebRTC] Sent stream-stopped acknowledgment for channel %s", channelID)
 
 		case webrtc.MsgTypePing:
 			response := &webrtc.SignalingMessage{Type: webrtc.MsgTypePong}
 			data, _ := response.ToJSON()
-			conn.WriteMessage(1, data)
+			safeWrite(1, data)
 		}
 	}
 
@@ -580,13 +600,6 @@ func handleWebRTCSignaling(c *gin.Context) {
 	}
 
 	log.Printf("[WebRTC] WebSocket disconnected for channel %s", channelID)
-}
-
-// sendError sends an error message via WebSocket
-func sendError(conn interface{ WriteMessage(int, []byte) error }, peerID, errorMsg string) {
-	msg := webrtc.NewErrorMessage(peerID, errorMsg)
-	data, _ := msg.ToJSON()
-	conn.WriteMessage(1, data)
 }
 
 // StartWebRTCServiceStream starts a WebRTC stream for a specific service

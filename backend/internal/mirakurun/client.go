@@ -1,11 +1,15 @@
 package mirakurun
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
+	"os"
+	"strconv"
 	"time"
 )
 
@@ -23,10 +27,10 @@ type Channel struct {
 }
 
 type Service struct {
-	ID       int64  `json:"id"`
-	ServiceID int   `json:"serviceId"`
-	NetworkID int   `json:"networkId"`
-	Name     string `json:"name"`
+	ID        int64  `json:"id"`
+	ServiceID int    `json:"serviceId"`
+	NetworkID int    `json:"networkId"`
+	Name      string `json:"name"`
 }
 
 type Program struct {
@@ -47,16 +51,28 @@ type Genre struct {
 }
 
 func NewClient(baseURL string) *Client {
+	timeout := 5 * time.Second
+	if value, err := strconv.Atoi(os.Getenv("HTTP_REQUEST_TIMEOUT_SECONDS")); err == nil && value > 0 {
+		timeout = time.Duration(value) * time.Second
+	}
 	return &Client{
 		baseURL: baseURL,
 		httpClient: &http.Client{
-			Timeout: 30 * time.Second,
+			Timeout: timeout,
 		},
 	}
 }
 
 func (c *Client) GetChannels() ([]Channel, error) {
-	resp, err := c.httpClient.Get(c.baseURL + "/api/channels")
+	return c.GetChannelsContext(context.Background())
+}
+
+func (c *Client) GetChannelsContext(ctx context.Context) ([]Channel, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.baseURL+"/api/channels", nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := c.httpClient.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -96,11 +112,11 @@ func (c *Client) GetPrograms(serviceID int) ([]Program, error) {
 	var programs []Program
 	for _, p := range allPrograms {
 		// Include programs that are currently airing or will air in the future
-		if p.StartAt + int64(p.Duration) > now {
+		if p.StartAt+int64(p.Duration) > now {
 			programs = append(programs, p)
 		}
 	}
-	
+
 	// Sort programs by start time
 	for i := 0; i < len(programs)-1; i++ {
 		for j := i + 1; j < len(programs); j++ {
@@ -135,20 +151,20 @@ func (c *Client) GetAllPrograms() ([]Program, error) {
 }
 
 func (c *Client) GetServiceStream(serviceID int64) (io.ReadCloser, error) {
+	return c.GetServiceStreamContext(context.Background(), serviceID)
+}
+
+func (c *Client) GetServiceStreamContext(ctx context.Context, serviceID int64) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/api/services/%d/stream", c.baseURL, serviceID)
 	log.Printf("Requesting service stream from Mirakurun: %s", url)
-	
-	// Create request with no timeout for streaming
-	req, err := http.NewRequest("GET", url, nil)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	
-	// Use a client with no timeout for streaming
-	streamClient := &http.Client{
-		Timeout: 0, // No timeout for streaming
-	}
-	
+	req.Header.Set("User-Agent", "tv-viewer/1.0")
+	streamClient := newStreamClient()
+
 	resp, err := streamClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to connect to Mirakurun service stream: %v", err)
@@ -170,20 +186,20 @@ func (c *Client) GetChannelStream(channelID string) (io.ReadCloser, error) {
 }
 
 func (c *Client) GetChannelStreamWithType(channelType, channelID string) (io.ReadCloser, error) {
+	return c.GetChannelStreamWithTypeContext(context.Background(), channelType, channelID)
+}
+
+func (c *Client) GetChannelStreamWithTypeContext(ctx context.Context, channelType, channelID string) (io.ReadCloser, error) {
 	url := fmt.Sprintf("%s/api/channels/%s/%s/stream", c.baseURL, channelType, channelID)
 	log.Printf("Requesting stream from Mirakurun: %s", url)
-	
-	// Create request with longer timeout for streaming
-	req, err := http.NewRequest("GET", url, nil)
+
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	
-	// Use a client with no timeout for streaming
-	streamClient := &http.Client{
-		Timeout: 0, // No timeout for streaming
-	}
-	
+	req.Header.Set("User-Agent", "tv-viewer/1.0")
+	streamClient := newStreamClient()
+
 	resp, err := streamClient.Do(req)
 	if err != nil {
 		log.Printf("Failed to connect to Mirakurun stream: %v", err)
@@ -197,4 +213,59 @@ func (c *Client) GetChannelStreamWithType(channelType, channelID string) (io.Rea
 	}
 
 	return resp.Body, nil
+}
+
+func streamConnectTimeout() time.Duration {
+	seconds := 10
+	if value, err := strconv.Atoi(os.Getenv("STREAM_CONNECT_TIMEOUT_SECONDS")); err == nil && value > 0 {
+		seconds = value
+	}
+	return time.Duration(seconds) * time.Second
+}
+
+// newStreamClient bounds connection and response-header setup without
+// applying a deadline to the live response body.
+func newStreamClient() *http.Client {
+	timeout := streamConnectTimeout()
+	dialer := &net.Dialer{Timeout: timeout, KeepAlive: 30 * time.Second}
+	transport := &http.Transport{
+		DialContext:           dialer.DialContext,
+		ResponseHeaderTimeout: timeout,
+		IdleConnTimeout:       90 * time.Second,
+	}
+	return &http.Client{Transport: transport, Timeout: 0}
+}
+
+type Tuner struct {
+	Types   []string    `json:"types"`
+	IsUsing bool        `json:"isUsing"`
+	IsFree  bool        `json:"isFree"`
+	Users   []TunerUser `json:"users"`
+}
+
+type TunerUser struct {
+	ID    string `json:"id"`
+	Agent string `json:"agent"`
+	URL   string `json:"url"`
+}
+
+func (c *Client) GetTuners() ([]Tuner, error) {
+	resp, err := c.httpClient.Get(c.baseURL + "/api/tuners")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
+	}
+	var tuners []Tuner
+	if err := json.NewDecoder(resp.Body).Decode(&tuners); err != nil {
+		return nil, err
+	}
+	return tuners, nil
+}
+
+func (c *Client) Health() bool {
+	_, err := c.GetChannels()
+	return err == nil
 }

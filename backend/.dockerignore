@@ -1,0 +1,8 @@
+main
+server
+tv-viewer-backend
+tv-viewer-server
+*.db
+*.sqlite
+*.log
+.git

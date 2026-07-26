@@ -2,6 +2,10 @@ package webrtc
 
 import (
 	"bytes"
+	"encoding/binary"
+	"errors"
+	"io"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -11,6 +15,9 @@ import (
 
 // TestH264Streaming tests H.264 streaming between two peers
 func TestH264Streaming(t *testing.T) {
+	if os.Getenv("RUN_WEBRTC_INTEGRATION") != "1" {
+		t.Skip("set RUN_WEBRTC_INTEGRATION=1 to run the local ICE integration test")
+	}
 	// Create sender and receiver peer connections
 	sender, err := webrtc.NewPeerConnection(webrtc.Configuration{})
 	if err != nil {
@@ -81,15 +88,29 @@ func TestH264Streaming(t *testing.T) {
 	})
 
 	// Signal exchange
+	senderConnected := make(chan struct{})
+	sender.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
+		t.Logf("Sender ICE state: %s", state)
+		if state == webrtc.ICEConnectionStateConnected {
+			select {
+			case <-senderConnected:
+			default:
+				close(senderConnected)
+			}
+		}
+	})
+
 	offer, err := sender.CreateOffer(nil)
 	if err != nil {
 		t.Fatalf("Failed to create offer: %v", err)
 	}
+	senderGatheringComplete := webrtc.GatheringCompletePromise(sender)
 	if err := sender.SetLocalDescription(offer); err != nil {
 		t.Fatalf("Failed to set sender local description: %v", err)
 	}
+	<-senderGatheringComplete
 
-	if err := receiver.SetRemoteDescription(offer); err != nil {
+	if err := receiver.SetRemoteDescription(*sender.LocalDescription()); err != nil {
 		t.Fatalf("Failed to set receiver remote description: %v", err)
 	}
 
@@ -97,23 +118,17 @@ func TestH264Streaming(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Failed to create answer: %v", err)
 	}
+	receiverGatheringComplete := webrtc.GatheringCompletePromise(receiver)
 	if err := receiver.SetLocalDescription(answer); err != nil {
 		t.Fatalf("Failed to set receiver local description: %v", err)
 	}
+	<-receiverGatheringComplete
 
-	if err := sender.SetRemoteDescription(answer); err != nil {
+	if err := sender.SetRemoteDescription(*receiver.LocalDescription()); err != nil {
 		t.Fatalf("Failed to set sender remote description: %v", err)
 	}
 
 	// Wait for ICE connection
-	senderConnected := make(chan struct{})
-	sender.OnICEConnectionStateChange(func(state webrtc.ICEConnectionState) {
-		t.Logf("Sender ICE state: %s", state)
-		if state == webrtc.ICEConnectionStateConnected {
-			close(senderConnected)
-		}
-	})
-
 	select {
 	case <-senderConnected:
 		t.Log("Sender connected")
@@ -252,6 +267,83 @@ func TestH264ParserWithRealData(t *testing.T) {
 	}
 	if nalUnits[2].Type != 5 {
 		t.Errorf("Third NAL should be IDR (5), got %d", nalUnits[2].Type)
+	}
+}
+
+func TestNativeVideoAccessUnitPreservesFrameBoundary(t *testing.T) {
+	stream := NewSharedStream()
+	data := []byte{0, 0, 0, 1, 0x67, 0x42, 0x00, 0x1f, 0, 0, 0, 1, 0x68, 0xce, 0x00, 0x1f, 0, 0, 0, 1, 0x65, 0x88, 0x84}
+	stream.publishVideoAccessUnit(data, 40*time.Millisecond, 0, false)
+	stream.bootstrapMu.Lock()
+	defer stream.bootstrapMu.Unlock()
+	if len(stream.bootstrap) != 3 {
+		t.Fatalf("bootstrap entries = %d, want SPS/PPS/IDR", len(stream.bootstrap))
+	}
+	if stream.bootstrap[2].duration != 40*time.Millisecond {
+		t.Fatalf("IDR duration = %s, want 40ms", stream.bootstrap[2].duration)
+	}
+}
+
+func TestH264ParserRejectsOversizedUnframedInput(t *testing.T) {
+	parser := NewH264Parser()
+	if _, err := parser.Parse(make([]byte, maxH264ParserBuffer+1)); !errors.Is(err, ErrH264BufferTooLarge) {
+		t.Fatalf("Parse error = %v, want %v", err, ErrH264BufferTooLarge)
+	}
+	if len(parser.buffer) != 0 {
+		t.Fatalf("parser retained %d bytes after rejecting input", len(parser.buffer))
+	}
+}
+
+func TestRunSubtitlesRawPreservesJSONMessage(t *testing.T) {
+	stream := NewSharedStream()
+	sub := &sharedSubscriber{
+		peer:         &Peer{ID: "test"},
+		subtitleJSON: make(chan []byte, 1),
+		done:         make(chan struct{}),
+	}
+	stream.subscribers["test"] = sub
+	message := []byte(`{"type":"show","id":"1","text":"字幕"}`)
+	var framed bytes.Buffer
+	if err := binary.Write(&framed, binary.BigEndian, uint32(len(message))); err != nil {
+		t.Fatal(err)
+	}
+	framed.Write(message)
+	if err := stream.RunSubtitlesRaw(&framed); !errors.Is(err, io.EOF) {
+		t.Fatalf("RunSubtitlesRaw error = %v, want EOF", err)
+	}
+	select {
+	case got := <-sub.subtitleJSON:
+		if !bytes.Equal(got, message) {
+			t.Fatalf("subtitle = %s, want %s", got, message)
+		}
+	default:
+		t.Fatal("subtitle was not delivered")
+	}
+}
+
+func TestSharedStreamNotifiesWhenPeerIsRemoved(t *testing.T) {
+	stream := NewSharedStream()
+	removed := make(chan string, 1)
+	stream.SetOnPeerRemoved(func(peerID string) { removed <- peerID })
+
+	// A minimal subscriber is sufficient because this test exercises removal only.
+	reader, writer := io.Pipe()
+	sub := &sharedSubscriber{
+		peer:          &Peer{ID: "peer-1"},
+		subtitleRead:  reader,
+		subtitleWrite: writer,
+		done:          make(chan struct{}),
+	}
+	stream.subscribers[sub.peer.ID] = sub
+	stream.RemovePeer(sub.peer.ID)
+
+	select {
+	case peerID := <-removed:
+		if peerID != sub.peer.ID {
+			t.Fatalf("removed peer = %q, want %q", peerID, sub.peer.ID)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("peer removal callback was not called")
 	}
 }
 

@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -9,7 +11,9 @@ import (
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/fuba/tv-viewer/internal/encoder"
@@ -20,13 +24,279 @@ import (
 )
 
 var (
-	peerManager     *webrtc.PeerManager
-	webrtcSessions  = make(map[string]*encoder.WebRTCSession)
-	webrtcMu        sync.RWMutex
+	peerManager    *webrtc.PeerManager
+	webrtcSessions = make(map[string]*encoder.WebRTCSession)
+	webrtcMu       sync.RWMutex
 )
 
 func init() {
 	peerManager = webrtc.NewPeerManager()
+}
+
+// streamingContext holds the state for one WebSocket subscriber.
+type streamingContext struct {
+	channelID       string
+	burnInSubtitles bool
+	audioMode       encoder.AudioMode // Dual mono mode: "main", "sub", "both"
+	mirakurunURL    string
+	peer            *webrtc.Peer
+	session         *encoder.WebRTCSession
+	mu              sync.Mutex
+	stopCh          chan struct{}
+	retryCount      int
+	maxRetries      int
+	shared          *sharedSession
+	stopOnce        sync.Once
+}
+
+type cancelReadCloser struct {
+	io.ReadCloser
+	cancel context.CancelFunc
+}
+
+type streamTarget struct {
+	channelType    string
+	channel        string
+	programNumbers []uint16
+}
+
+// resolveStreamTarget maps a UI selection to a physical tuner channel and one
+// or more MPEG-TS programs. Service selections must keep exactly one program.
+func resolveStreamTarget(channels []mirakurun.Channel, selectionID string) (streamTarget, error) {
+	if strings.HasPrefix(selectionID, "service:") {
+		parts := strings.Split(strings.TrimPrefix(selectionID, "service:"), ":")
+		if len(parts) != 3 || parts[0] == "" || parts[1] == "" || parts[2] == "" {
+			return streamTarget{}, fmt.Errorf("invalid service selection %q", selectionID)
+		}
+		requestedType, requestedChannel, rawServiceID := parts[0], parts[1], parts[2]
+		serviceID, err := strconv.ParseInt(rawServiceID, 10, 64)
+		if err != nil || serviceID <= 0 {
+			return streamTarget{}, fmt.Errorf("invalid service selection %q", selectionID)
+		}
+		for _, channel := range channels {
+			if channel.Type != requestedType || channel.Channel != requestedChannel {
+				continue
+			}
+			for _, service := range channel.Services {
+				if service.ID != serviceID && int64(service.ServiceID) != serviceID {
+					continue
+				}
+				if service.ServiceID <= 0 || service.ServiceID > 0xffff {
+					return streamTarget{}, fmt.Errorf("invalid MPEG-TS service ID %d for %s", service.ServiceID, selectionID)
+				}
+				return streamTarget{
+					channelType:    channel.Type,
+					channel:        channel.Channel,
+					programNumbers: []uint16{uint16(service.ServiceID)},
+				}, nil
+			}
+		}
+		return streamTarget{}, fmt.Errorf("service not found: %d", serviceID)
+	}
+
+	for _, channel := range channels {
+		if channel.Channel != selectionID {
+			continue
+		}
+		programNumbers := make([]uint16, 0, len(channel.Services))
+		for _, service := range channel.Services {
+			if service.ServiceID <= 0 || service.ServiceID > 0xffff {
+				return streamTarget{}, fmt.Errorf("invalid MPEG-TS service ID %d for channel %s", service.ServiceID, selectionID)
+			}
+			programNumbers = append(programNumbers, uint16(service.ServiceID))
+		}
+		return streamTarget{channelType: channel.Type, channel: channel.Channel, programNumbers: programNumbers}, nil
+	}
+
+	return streamTarget{}, fmt.Errorf("channel not found: %s", selectionID)
+}
+
+func (r *cancelReadCloser) Close() error {
+	r.cancel()
+	return r.ReadCloser.Close()
+}
+
+func (ctx *streamingContext) stop() {
+	if ctx == nil {
+		return
+	}
+	ctx.stopOnce.Do(func() {
+		close(ctx.stopCh)
+		ctx.mu.Lock()
+		shared := ctx.shared
+		session := ctx.session
+		ctx.mu.Unlock()
+		if shared != nil {
+			shared.removePeer(ctx.peer.ID)
+			return
+		}
+		if session != nil {
+			session.Stop()
+		}
+	})
+}
+
+func (ctx *streamingContext) isStopped() bool {
+	select {
+	case <-ctx.stopCh:
+		return true
+	default:
+		return false
+	}
+}
+
+// startStreamingWithRetry attaches a subscriber to a shared channel encoder.
+func startStreamingWithRetry(ctx *streamingContext, safeWrite func(int, []byte) error) error {
+	sharedSessions.startMu.Lock()
+	defer sharedSessions.startMu.Unlock()
+
+	log.Printf("[WebRTC] Starting shared stream for channel %s", ctx.channelID)
+	if ctx.isStopped() {
+		return context.Canceled
+	}
+	if err := sharedSessions.canAccept(ctx.channelID); err != nil {
+		return err
+	}
+
+	ctx.mu.Lock()
+	if existing := sharedSessions.get(ctx.channelID); existing != nil {
+		if !existing.matchesSettings(ctx.burnInSubtitles, ctx.audioMode) {
+			ctx.mu.Unlock()
+			return fmt.Errorf("channel %s is already streaming with different audio/subtitle settings", ctx.channelID)
+		}
+		ctx.shared = existing
+		ctx.session = existing.session
+		ctx.mu.Unlock()
+		if ctx.isStopped() {
+			return context.Canceled
+		}
+		if err := existing.addPeer(ctx.peer); err != nil {
+			existing.stopIfIdle()
+			return err
+		}
+		if ctx.isStopped() {
+			existing.removePeer(ctx.peer.ID)
+			return context.Canceled
+		}
+		return nil
+	}
+	ctx.mu.Unlock()
+
+	// Get Mirakurun stream
+	log.Printf("[WebRTC] startStreamingWithRetry: fetching channels from Mirakurun for %s", ctx.channelID)
+	client := mirakurun.NewClient(ctx.mirakurunURL)
+	requestCtx, cancelRequest := context.WithCancel(context.Background())
+	requestFinished := make(chan struct{})
+	go func() {
+		select {
+		case <-ctx.stopCh:
+			cancelRequest()
+		case <-requestFinished:
+		}
+	}()
+
+	channels, err := client.GetChannelsContext(requestCtx)
+	if err != nil {
+		close(requestFinished)
+		cancelRequest()
+		log.Printf("[WebRTC] startStreamingWithRetry: failed to get channels: %v", err)
+		return fmt.Errorf("failed to get channels: %w", err)
+	}
+	if ctx.isStopped() {
+		close(requestFinished)
+		cancelRequest()
+		return context.Canceled
+	}
+	log.Printf("[WebRTC] startStreamingWithRetry: got %d channels", len(channels))
+
+	target, err := resolveStreamTarget(channels, ctx.channelID)
+	if err != nil {
+		close(requestFinished)
+		cancelRequest()
+		return err
+	}
+
+	// Keep Mirakurun responsible for tuning and decoding, then select the
+	// requested service from the physical channel TS in the native Go demuxer.
+	stream, err := client.GetChannelStreamWithTypeContext(requestCtx, target.channelType, target.channel)
+	streamURL := fmt.Sprintf("%s/api/channels/%s/%s/stream", ctx.mirakurunURL, target.channelType, target.channel)
+
+	if stream == nil {
+		close(requestFinished)
+		cancelRequest()
+		return fmt.Errorf("failed to get stream: %w", err)
+	}
+	close(requestFinished)
+	stream = &cancelReadCloser{ReadCloser: stream, cancel: cancelRequest}
+	if ctx.isStopped() {
+		stream.Close()
+		return context.Canceled
+	}
+
+	// Start WebRTC encoding with audio mode
+	audioMode := ctx.audioMode
+	if audioMode == "" {
+		audioMode = encoder.AudioModeBoth // Default to stereo
+	}
+	ctx.audioMode = audioMode
+	var session *encoder.WebRTCSession
+	log.Printf("[WebRTC] Using native Go MPEG-TS pipeline for channel %s", ctx.channelID)
+	session, err = encoderInstance.StartNativeWebRTCEncoding(ctx.channelID, stream, streamURL, target.programNumbers, ctx.burnInSubtitles, audioMode)
+	if err != nil {
+		stream.Close()
+		return fmt.Errorf("failed to start encoding: %w", err)
+	}
+
+	ctx.mu.Lock()
+	ctx.session = session
+	ctx.mu.Unlock()
+	if ctx.isStopped() {
+		session.Stop()
+		return context.Canceled
+	}
+
+	shared := sharedSessions.register(ctx.channelID, session, ctx.burnInSubtitles, audioMode)
+	if shared.session != session {
+		// Another request won the registration race. Release the duplicate encoder.
+		session.Stop()
+	} else {
+		webrtcMu.Lock()
+		webrtcSessions[ctx.channelID] = session
+		webrtcMu.Unlock()
+	}
+	ctx.mu.Lock()
+	ctx.session = shared.session
+	ctx.shared = shared
+	ctx.mu.Unlock()
+	if ctx.isStopped() {
+		shared.stopIfIdle()
+		return context.Canceled
+	}
+	if err := shared.addPeer(ctx.peer); err != nil {
+		if shared.session == session {
+			shared.stop()
+		}
+		return err
+	}
+	if ctx.isStopped() {
+		shared.removePeer(ctx.peer.ID)
+		shared.stopIfIdle()
+		return context.Canceled
+	}
+	return nil
+}
+
+func parseAudioMode(value *string) (encoder.AudioMode, error) {
+	if value == nil || *value == "" {
+		return encoder.AudioModeBoth, nil
+	}
+	mode := encoder.AudioMode(*value)
+	switch mode {
+	case encoder.AudioModeMain, encoder.AudioModeSub, encoder.AudioModeBoth:
+		return mode, nil
+	default:
+		return "", fmt.Errorf("invalid audioMode %q", *value)
+	}
 }
 
 // SetupWebRTCRoutes adds WebRTC-specific routes
@@ -52,131 +322,36 @@ func startWebRTCStream(c *gin.Context) {
 		return
 	}
 
-	mirakurunURL := os.Getenv("MIRAKURUN_URL")
-	if mirakurunURL == "" {
-		mirakurunURL = "http://tuner:40772"
-	}
-
-	client := mirakurun.NewClient(mirakurunURL)
-
-	// Get channel info
-	channels, err := client.GetChannels()
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get channels"})
-		return
-	}
-
-	var channelType string
-	var firstServiceID int64
-	for _, ch := range channels {
-		if ch.Channel == channelID {
-			channelType = ch.Type
-			if len(ch.Services) > 0 {
-				firstServiceID = ch.Services[0].ID
-			}
-			break
-		}
-	}
-
-	if channelType == "" {
-		c.JSON(http.StatusNotFound, gin.H{"error": "Channel not found"})
-		return
-	}
-
-	// Get stream
-	var stream io.ReadCloser
-	var streamURL string
-	if firstServiceID != 0 {
-		stream, err = client.GetServiceStream(firstServiceID)
-		streamURL = fmt.Sprintf("%s/api/services/%d/stream", mirakurunURL, firstServiceID)
-	} else {
-		stream, err = client.GetChannelStreamWithType(channelType, channelID)
-		streamURL = fmt.Sprintf("%s/api/channels/%s/%s/stream", mirakurunURL, channelType, channelID)
-	}
-
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to get stream",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	// Start WebRTC encoding
-	session, err := encoderInstance.StartWebRTCEncoding(channelID, stream, streamURL, -1, -1)
-	if err != nil {
-		stream.Close()
-		c.JSON(http.StatusInternalServerError, gin.H{
-			"error":   "Failed to start WebRTC encoding",
-			"details": err.Error(),
-		})
-		return
-	}
-
-	// Store session
-	webrtcMu.Lock()
-	webrtcSessions[channelID] = session
-	webrtcMu.Unlock()
-
-	// Create WebRTC peer
 	peer, err := peerManager.CreatePeer(channelID)
 	if err != nil {
-		session.Stop()
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to create WebRTC peer",
 			"details": err.Error(),
 		})
 		return
 	}
-
-	// Start streaming video to peer
-	go func() {
-		if err := peer.StreamH264(session.VideoPipe); err != nil {
-			log.Printf("[WebRTC] Video stream ended for channel %s: %v", channelID, err)
+	mirakurunURL := os.Getenv("MIRAKURUN_URL")
+	if mirakurunURL == "" {
+		mirakurunURL = "http://tuner:40772"
+	}
+	streamCtx := &streamingContext{
+		channelID: channelID, burnInSubtitles: true, audioMode: encoder.AudioModeBoth,
+		mirakurunURL: mirakurunURL, peer: peer, stopCh: make(chan struct{}), maxRetries: 5,
+	}
+	if err := startStreamingWithRetry(streamCtx, func(int, []byte) error { return nil }); err != nil {
+		peerManager.RemovePeer(peer.ID)
+		status := http.StatusInternalServerError
+		if err == errViewerLimit || err == errChannelLimit {
+			status = http.StatusServiceUnavailable
 		}
-	}()
-
-	// Start streaming audio to peer (wait for audio pipe to be ready)
-	go func() {
-		// Wait up to 5 seconds for audio pipe to be ready
-		for i := 0; i < 50; i++ {
-			if session.AudioPipe != nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if session.AudioPipe == nil {
-			log.Printf("[WebRTC] Audio pipe not ready for channel %s, skipping audio", channelID)
-			return
-		}
-		if err := peer.StreamOpus(session.AudioPipe); err != nil {
-			log.Printf("[WebRTC] Audio stream ended for channel %s: %v", channelID, err)
-		}
-	}()
-
-	// Start streaming subtitles to peer (wait for subtitle pipe to be ready)
-	go func() {
-		// Wait up to 5 seconds for subtitle pipe to be ready
-		for i := 0; i < 50; i++ {
-			if session.SubtitlePipe != nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-		if session.SubtitlePipe == nil {
-			log.Printf("[WebRTC] Subtitle pipe not ready for channel %s, skipping subtitles", channelID)
-			return
-		}
-		if err := peer.StreamSubtitles(session.SubtitlePipe); err != nil {
-			log.Printf("[WebRTC] Subtitle stream ended for channel %s: %v", channelID, err)
-		}
-	}()
-
+		c.JSON(status, gin.H{"error": err.Error()})
+		return
+	}
 	c.JSON(http.StatusOK, gin.H{
 		"status":    "streaming",
 		"peerId":    peer.ID,
 		"channelId": channelID,
-		"sessionId": session.ID,
+		"sessionId": streamCtx.session.ID,
 	})
 }
 
@@ -217,7 +392,7 @@ func handleWebRTCOffer(c *gin.Context) {
 // handleICECandidate handles ICE candidate from client
 func handleICECandidate(c *gin.Context) {
 	var req struct {
-		PeerID    string                       `json:"peerId"`
+		PeerID    string                      `json:"peerId"`
 		Candidate pionwebrtc.ICECandidateInit `json:"candidate"`
 	}
 
@@ -253,13 +428,16 @@ func closePeer(c *gin.Context) {
 		return
 	}
 
-	// Stop associated encoding session
-	webrtcMu.Lock()
-	if session, exists := webrtcSessions[peer.ChannelID]; exists {
-		session.Stop()
-		delete(webrtcSessions, peer.ChannelID)
+	if shared := sharedSessions.get(peer.ChannelID); shared != nil {
+		shared.removePeer(peer.ID)
+	} else {
+		webrtcMu.Lock()
+		if session, exists := webrtcSessions[peer.ChannelID]; exists {
+			session.Stop()
+			delete(webrtcSessions, peer.ChannelID)
+		}
+		webrtcMu.Unlock()
 	}
-	webrtcMu.Unlock()
 
 	// Remove peer
 	peerManager.RemovePeer(peerID)
@@ -270,17 +448,27 @@ func closePeer(c *gin.Context) {
 // getWebRTCStatus returns WebRTC status
 func getWebRTCStatus(c *gin.Context) {
 	webrtcMu.RLock()
-	sessionCount := len(webrtcSessions)
+	legacySessionCount := 0
+	for channelID := range webrtcSessions {
+		if sharedSessions.get(channelID) == nil {
+			legacySessionCount++
+		}
+	}
 	webrtcMu.RUnlock()
+	sessionCount := sharedSessions.count() + legacySessionCount
+	activeChannelID, activeViewerCount := sharedSessions.activeChannel()
 
 	c.JSON(http.StatusOK, gin.H{
-		"peerCount":    peerManager.GetPeerCount(),
-		"sessionCount": sessionCount,
+		"peerCount":         peerManager.GetPeerCount(),
+		"sessionCount":      sessionCount,
+		"activeChannelId":   activeChannelID,
+		"activeViewerCount": activeViewerCount,
 	})
 }
 
 // stopAllWebRTCSessions stops all existing WebRTC sessions to release tuners quickly
 func stopAllWebRTCSessions() {
+	sharedSessions.stopAll()
 	webrtcMu.Lock()
 	defer webrtcMu.Unlock()
 
@@ -299,13 +487,33 @@ const (
 	// How long to wait for any message before considering connection dead
 	wsReadTimeout = 30 * time.Second
 	// How often to send pings from server
-	wsPingInterval = 10 * time.Second
+	wsPingInterval          = 10 * time.Second
+	maxSignalingMessageSize = 64 * 1024
+	maxPendingICECandidates = 128
 )
+
+func validChannelID(value string) bool {
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, char := range value {
+		if (char >= 'a' && char <= 'z') || (char >= 'A' && char <= 'Z') ||
+			(char >= '0' && char <= '9') || strings.ContainsRune(":._-", char) {
+			continue
+		}
+		return false
+	}
+	return true
+}
 
 // handleWebRTCSignaling handles WebSocket-based signaling
 func handleWebRTCSignaling(c *gin.Context) {
 	channelID, err := url.QueryUnescape(c.Param("channelId"))
 	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		return
+	}
+	if !validChannelID(channelID) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
 		return
 	}
@@ -316,6 +524,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 		return
 	}
 	defer conn.Close()
+	conn.SetReadLimit(maxSignalingMessageSize)
 
 	// Mutex for synchronized WebSocket writes (gorilla/websocket doesn't support concurrent writes)
 	var wsMu sync.Mutex
@@ -332,9 +541,21 @@ func handleWebRTCSignaling(c *gin.Context) {
 
 	log.Printf("[WebRTC] WebSocket connected for channel %s", channelID)
 
+	// Get Mirakurun URL (used by both stream-start and restart-encoding)
+	mirakurunURL := os.Getenv("MIRAKURUN_URL")
+	if mirakurunURL == "" {
+		mirakurunURL = "http://tuner:40772"
+	}
+
 	// Helper to send error messages safely
 	sendErrorSafe := func(peerID, errorMsg string) {
 		msg := webrtc.NewErrorMessage(peerID, errorMsg)
+		data, _ := msg.ToJSON()
+		safeWrite(1, data)
+	}
+	sendRequestErrorSafe := func(peerID, requestID, errorMsg string) {
+		msg := webrtc.NewErrorMessage(peerID, errorMsg)
+		msg.RequestID = requestID
 		data, _ := msg.ToJSON()
 		safeWrite(1, data)
 	}
@@ -369,7 +590,9 @@ func handleWebRTCSignaling(c *gin.Context) {
 	}()
 
 	var peer *webrtc.Peer
-	var session *encoder.WebRTCSession
+	var streamCtx *streamingContext
+	var streamGeneration atomic.Uint64
+	var pendingICECandidates []pionwebrtc.ICECandidateInit
 
 	// Message handling loop
 	for {
@@ -393,14 +616,24 @@ func handleWebRTCSignaling(c *gin.Context) {
 		switch msg.Type {
 		case webrtc.MsgTypeStreamStart:
 			// Start streaming
-			log.Printf("[WebRTC] Starting stream for channel %s", channelID)
+			// Default: send ARIB captions over the data channel.
+			burnInSubtitles := true
+			if msg.BurnInSubtitles != nil {
+				burnInSubtitles = *msg.BurnInSubtitles
+			}
+			// Default: stereo audio (both channels)
+			audioMode, err := parseAudioMode(msg.AudioMode)
+			if err != nil {
+				sendErrorSafe("", err.Error())
+				continue
+			}
+			log.Printf("[WebRTC] Starting stream for channel %s (burnInSubtitles=%v, audioMode=%s)", channelID, burnInSubtitles, audioMode)
 
-			// Stop only THIS connection's existing session (not all sessions!)
-			// This allows multiple tabs to have independent sessions
-			if session != nil {
-				log.Printf("[WebRTC] Stopping existing session for this connection: %s", session.ID)
-				session.Stop()
-				session = nil
+			// Stop existing streaming context and session
+			if streamCtx != nil {
+				log.Printf("[WebRTC] Stopping existing stream for this connection")
+				streamCtx.stop()
+				streamCtx = nil
 			}
 			if peer != nil {
 				log.Printf("[WebRTC] Removing existing peer for this connection: %s", peer.ID)
@@ -408,83 +641,17 @@ func handleWebRTCSignaling(c *gin.Context) {
 				peer = nil
 			}
 
-			// Get Mirakurun stream
-			mirakurunURL := os.Getenv("MIRAKURUN_URL")
-			if mirakurunURL == "" {
-				mirakurunURL = "http://tuner:40772"
-			}
-
-			client := mirakurun.NewClient(mirakurunURL)
-			channels, err := client.GetChannels()
-			if err != nil {
-				sendErrorSafe("", "Failed to get channels")
+			if err := sharedSessions.canAccept(channelID); err != nil {
+				sendErrorSafe("", err.Error())
 				continue
 			}
 
-			var channelType string
-			var firstServiceID int64
-			for _, ch := range channels {
-				if ch.Channel == channelID {
-					channelType = ch.Type
-					if len(ch.Services) > 0 {
-						firstServiceID = ch.Services[0].ID
-					}
-					break
-				}
-			}
-
-			if channelType == "" {
-				sendErrorSafe("", "Channel not found")
-				continue
-			}
-
-			var stream io.ReadCloser
-			var streamURL string
-			if firstServiceID != 0 {
-				stream, err = client.GetServiceStream(firstServiceID)
-				streamURL = fmt.Sprintf("%s/api/services/%d/stream", mirakurunURL, firstServiceID)
-			} else {
-				stream, err = client.GetChannelStreamWithType(channelType, channelID)
-				streamURL = fmt.Sprintf("%s/api/channels/%s/%s/stream", mirakurunURL, channelType, channelID)
-			}
-
+			peer, err = peerManager.CreatePeerLimited(channelID, maxViewers())
 			if err != nil {
-				sendErrorSafe("", "Failed to get stream: "+err.Error())
-				continue
-			}
-
-			// Start WebRTC encoding
-			session, err = encoderInstance.StartWebRTCEncoding(channelID, stream, streamURL, -1, -1)
-			if err != nil {
-				stream.Close()
-				sendErrorSafe("", "Failed to start encoding: "+err.Error())
-				continue
-			}
-
-			// Create peer BEFORE adding to map
-			peer, err = peerManager.CreatePeer(channelID)
-			if err != nil {
-				session.Stop()
-				session = nil // Clear local variable on failure
 				sendErrorSafe("", "Failed to create peer: "+err.Error())
 				continue
 			}
-
-			// Only add to map after both session and peer are successfully created
-			webrtcMu.Lock()
-			webrtcSessions[channelID] = session
-			webrtcMu.Unlock()
-
-			// Set up ICE candidate callback
-			peer.SetOnICECandidate(func(candidate *pionwebrtc.ICECandidate) {
-				if candidate == nil {
-					return
-				}
-				candidateInit := candidate.ToJSON()
-				response := webrtc.NewICECandidateMessage(peer.ID, candidateInit)
-				data, _ := response.ToJSON()
-				safeWrite(1, data)
-			})
+			pendingICECandidates = nil
 
 			// Create offer (server-side offer for push mode)
 			offer, err := peer.PC.CreateOffer(nil)
@@ -493,56 +660,48 @@ func handleWebRTCSignaling(c *gin.Context) {
 				continue
 			}
 
+			gatheringComplete := pionwebrtc.GatheringCompletePromise(peer.PC)
 			if err := peer.PC.SetLocalDescription(offer); err != nil {
 				sendErrorSafe(peer.ID, "Failed to set local description: "+err.Error())
 				continue
 			}
+			<-gatheringComplete
 
-			// Send offer to client
-			response := webrtc.NewOfferMessage(peer.ID, offer)
+			// Send the fully gathered offer so clients do not need to process a
+			// candidate before the remote description is installed.
+			response := webrtc.NewOfferMessage(peer.ID, *peer.PC.LocalDescription())
 			data, _ := response.ToJSON()
 			safeWrite(1, data)
 
-			// Start streaming video
-			go func() {
-				if err := peer.StreamH264(session.VideoPipe); err != nil {
-					log.Printf("[WebRTC] Video stream ended: %v", err)
-				}
-			}()
+			// Create streaming context with retry support
+			streamCtx = &streamingContext{
+				channelID:       channelID,
+				burnInSubtitles: burnInSubtitles,
+				audioMode:       audioMode,
+				mirakurunURL:    mirakurunURL,
+				peer:            peer,
+				stopCh:          make(chan struct{}),
+				maxRetries:      5, // Max 5 retries on crash
+			}
 
-			// Start streaming audio
+			// Start streaming with automatic retry on native pipeline failure
+			// Run in goroutine to prevent blocking WebSocket message loop
+			// This allows answer and ICE candidate messages to be processed during pipeline init
+			currentStreamCtx := streamCtx
+			currentPeerID := peer.ID
+			currentGeneration := streamGeneration.Add(1)
 			go func() {
-				// Wait up to 5 seconds for audio pipe to be ready
-				for i := 0; i < 50; i++ {
-					if session.AudioPipe != nil {
-						break
+				if err := startStreamingWithRetry(currentStreamCtx, safeWrite); err != nil {
+					if errors.Is(err, context.Canceled) || currentStreamCtx.isStopped() {
+						return
 					}
-					time.Sleep(100 * time.Millisecond)
-				}
-				if session.AudioPipe == nil {
-					log.Printf("[WebRTC] Audio pipe not ready, skipping audio")
-					return
-				}
-				if err := peer.StreamOpus(session.AudioPipe); err != nil {
-					log.Printf("[WebRTC] Audio stream ended: %v", err)
-				}
-			}()
-
-			// Start streaming subtitles
-			go func() {
-				// Wait up to 5 seconds for subtitle pipe to be ready
-				for i := 0; i < 50; i++ {
-					if session.SubtitlePipe != nil {
-						break
+					if streamGeneration.Load() != currentGeneration {
+						return
 					}
-					time.Sleep(100 * time.Millisecond)
-				}
-				if session.SubtitlePipe == nil {
-					log.Printf("[WebRTC] Subtitle pipe not ready, skipping subtitles")
-					return
-				}
-				if err := peer.StreamSubtitles(session.SubtitlePipe); err != nil {
-					log.Printf("[WebRTC] Subtitle stream ended: %v", err)
+					log.Printf("[WebRTC] stream-start: startStreamingWithRetry failed: %v", err)
+					currentStreamCtx.stop()
+					peerManager.RemovePeer(currentPeerID)
+					sendErrorSafe(currentPeerID, "Failed to start streaming: "+err.Error())
 				}
 			}()
 
@@ -552,29 +711,154 @@ func handleWebRTCSignaling(c *gin.Context) {
 			}
 			if err := peer.PC.SetRemoteDescription(*msg.SDP); err != nil {
 				log.Printf("[WebRTC] Failed to set remote description: %v", err)
+				continue
 			}
+			for _, candidate := range pendingICECandidates {
+				if err := peer.AddICECandidate(candidate); err != nil {
+					log.Printf("[WebRTC] Failed to add queued ICE candidate: %v", err)
+				}
+			}
+			pendingICECandidates = nil
 
 		case webrtc.MsgTypeICECandidate:
 			if peer == nil || msg.Candidate == nil {
+				continue
+			}
+			if peer.PC.RemoteDescription() == nil {
+				if len(pendingICECandidates) >= maxPendingICECandidates {
+					log.Printf("[WebRTC] Dropping excess ICE candidate for peer %s", peer.ID)
+					continue
+				}
+				pendingICECandidates = append(pendingICECandidates, *msg.Candidate)
 				continue
 			}
 			if err := peer.AddICECandidate(*msg.Candidate); err != nil {
 				log.Printf("[WebRTC] Failed to add ICE candidate: %v", err)
 			}
 
+		case webrtc.MsgTypeRestartEncoding:
+			// Restart encoding with new settings (keeps WebRTC connection)
+			// This is used for:
+			// 1. Toggling ARIB caption delivery
+			// 2. Changing channels without reconnecting
+			// 3. Switching audio mode (dual mono)
+			newChannelID := channelID
+			if msg.ChannelID != "" {
+				newChannelID = msg.ChannelID
+			}
+			if !validChannelID(newChannelID) {
+				sendRequestErrorSafe("", msg.RequestID, "Invalid channel ID")
+				continue
+			}
+			burnInSubtitles := true
+			if msg.BurnInSubtitles != nil {
+				burnInSubtitles = *msg.BurnInSubtitles
+			}
+			if peer == nil {
+				sendRequestErrorSafe("", msg.RequestID, "No peer connection")
+				continue
+			}
+			// Default: stereo audio (both channels)
+			audioMode, err := parseAudioMode(msg.AudioMode)
+			if err != nil {
+				sendRequestErrorSafe(peer.ID, msg.RequestID, err.Error())
+				continue
+			}
+			log.Printf("[WebRTC] Restarting encoding for channel %s -> %s (burnInSubtitles=%v, audioMode=%s)", channelID, newChannelID, burnInSubtitles, audioMode)
+
+			if streamCtx != nil {
+				streamCtx.mu.Lock()
+				currentShared := streamCtx.shared
+				streamCtx.mu.Unlock()
+				if currentShared != nil && newChannelID != channelID && currentShared.peerCount() > 1 {
+					sendRequestErrorSafe(peer.ID, msg.RequestID, "channel cannot be changed while other viewers are watching")
+					continue
+				}
+				if currentShared != nil && !currentShared.matchesSettings(burnInSubtitles, audioMode) && currentShared.peerCount() > 1 {
+					sendRequestErrorSafe(peer.ID, msg.RequestID, "audio settings cannot be changed while this channel has multiple viewers")
+					continue
+				}
+			}
+			currentGeneration := streamGeneration.Add(1)
+
+			// Stop current streaming context and session (prevents auto-retry)
+			log.Printf("[WebRTC] restart-encoding: stopping old streaming context")
+			oldShared := (*sharedSession)(nil)
+			oldChannelID := channelID
+			if streamCtx != nil {
+				streamCtx.mu.Lock()
+				oldShared = streamCtx.shared
+				streamCtx.mu.Unlock()
+				streamCtx.stop()
+				streamCtx = nil
+			}
+			if oldShared != nil && (oldChannelID != newChannelID || !oldShared.matchesSettings(burnInSubtitles, audioMode)) {
+				oldShared.stopIfIdle()
+			}
+
+			// Update channel ID if changed
+			channelID = newChannelID
+			log.Printf("[WebRTC] restart-encoding: updated channelID to %s", channelID)
+
+			// Create new streaming context with retry support
+			log.Printf("[WebRTC] restart-encoding: creating new streaming context")
+			streamCtx = &streamingContext{
+				channelID:       channelID,
+				burnInSubtitles: burnInSubtitles,
+				audioMode:       audioMode,
+				mirakurunURL:    mirakurunURL,
+				peer:            peer,
+				stopCh:          make(chan struct{}),
+				maxRetries:      5,
+			}
+
+			// Start streaming with retry in a goroutine to prevent blocking WebSocket message loop
+			// This allows ping/pong to continue while pipeline initialization happens
+			log.Printf("[WebRTC] restart-encoding: starting streamingWithRetry in goroutine")
+			currentStreamCtx := streamCtx
+			currentChannelID := channelID
+			currentPeerID := peer.ID
+			currentRequestID := msg.RequestID
+			go func() {
+				if err := startStreamingWithRetry(currentStreamCtx, safeWrite); err != nil {
+					if errors.Is(err, context.Canceled) || currentStreamCtx.isStopped() {
+						return
+					}
+					if streamGeneration.Load() != currentGeneration {
+						return
+					}
+					log.Printf("[WebRTC] restart-encoding: startStreamingWithRetry failed: %v", err)
+					currentStreamCtx.stop()
+					peerManager.RemovePeer(currentPeerID)
+					sendRequestErrorSafe(currentPeerID, currentRequestID, "Failed to restart streaming: "+err.Error())
+					return
+				}
+				if streamGeneration.Load() != currentGeneration {
+					currentStreamCtx.stop()
+					return
+				}
+				log.Printf("[WebRTC] restart-encoding: startStreamingWithRetry succeeded")
+
+				// Send encoding-restarted acknowledgment
+				response := &webrtc.SignalingMessage{Type: webrtc.MsgTypeEncodingRestarted, ChannelID: currentChannelID, RequestID: currentRequestID}
+				data, _ := response.ToJSON()
+				safeWrite(1, data)
+				log.Printf("[WebRTC] Encoding restarted for channel %s", currentChannelID)
+			}()
+
 		case webrtc.MsgTypeStreamStop:
+			streamGeneration.Add(1)
 			log.Printf("[WebRTC] Received stream-stop for channel %s", channelID)
+			// Stop streaming context first (prevents auto-retry)
+			if streamCtx != nil {
+				streamCtx.stop()
+				streamCtx = nil
+			}
 			if peer != nil {
 				peerManager.RemovePeer(peer.ID)
 				peer = nil
 			}
-			if session != nil {
-				session.Stop()
-				webrtcMu.Lock()
-				delete(webrtcSessions, channelID)
-				webrtcMu.Unlock()
-				session = nil
-			}
+			pendingICECandidates = nil
 			// Send stream-stopped acknowledgment
 			response := &webrtc.SignalingMessage{Type: webrtc.MsgTypeStreamStopped}
 			data, _ := response.ToJSON()
@@ -589,14 +873,12 @@ func handleWebRTCSignaling(c *gin.Context) {
 	}
 
 	// Cleanup on disconnect
+	streamGeneration.Add(1)
+	if streamCtx != nil {
+		streamCtx.stop()
+	}
 	if peer != nil {
 		peerManager.RemovePeer(peer.ID)
-	}
-	if session != nil {
-		session.Stop()
-		webrtcMu.Lock()
-		delete(webrtcSessions, channelID)
-		webrtcMu.Unlock()
 	}
 
 	log.Printf("[WebRTC] WebSocket disconnected for channel %s", channelID)
@@ -630,7 +912,14 @@ func StartWebRTCServiceStream(c *gin.Context) {
 	streamURL := fmt.Sprintf("%s/api/services/%d/stream", mirakurunURL, serviceID)
 	sessionID := fmt.Sprintf("SVC_%d", serviceID)
 
-	session, err := encoderInstance.StartWebRTCEncoding(sessionID, stream, streamURL, -1, -1)
+	// Start the direct Go MPEG-TS pipeline (stereo audio).
+	programNumber := serviceID % 100000
+	if programNumber <= 0 || programNumber > 0xffff {
+		stream.Close()
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid MPEG-TS program number"})
+		return
+	}
+	session, err := encoderInstance.StartNativeWebRTCEncoding(sessionID, stream, streamURL, []uint16{uint16(programNumber)}, false, encoder.AudioModeBoth)
 	if err != nil {
 		stream.Close()
 		c.JSON(http.StatusInternalServerError, gin.H{
@@ -655,7 +944,13 @@ func StartWebRTCServiceStream(c *gin.Context) {
 	}
 
 	go func() {
-		if err := peer.StreamH264(session.VideoPipe); err != nil {
+		var err error
+		if session.VideoRaw {
+			err = peer.StreamRawH264(session.VideoPipe)
+		} else {
+			err = peer.StreamH264(session.VideoPipe)
+		}
+		if err != nil {
 			log.Printf("[WebRTC] Service video stream ended: %v", err)
 		}
 	}()
@@ -672,7 +967,13 @@ func StartWebRTCServiceStream(c *gin.Context) {
 			log.Printf("[WebRTC] Audio pipe not ready for service, skipping audio")
 			return
 		}
-		if err := peer.StreamOpus(session.AudioPipe); err != nil {
+		var err error
+		if session.AudioRaw {
+			err = peer.StreamRawOpus(session.AudioPipe)
+		} else {
+			err = peer.StreamOpus(session.AudioPipe)
+		}
+		if err != nil {
 			log.Printf("[WebRTC] Service audio stream ended: %v", err)
 		}
 	}()

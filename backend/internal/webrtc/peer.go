@@ -2,29 +2,42 @@ package webrtc
 
 import (
 	"context"
+	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
+	"github.com/fuba/tv-viewer/internal/streamframe"
 	"github.com/pion/webrtc/v4"
 	"github.com/pion/webrtc/v4/pkg/media"
 )
 
+var ErrPeerLimit = errors.New("peer limit reached")
+
 // Peer represents a WebRTC peer connection with associated tracks
 type Peer struct {
-	ID         string
-	ChannelID  string
-	PC         *webrtc.PeerConnection
-	VideoTrack *webrtc.TrackLocalStaticSample
-	AudioTrack *webrtc.TrackLocalStaticSample
-	DataChan   *webrtc.DataChannel
-	CreatedAt  time.Time
+	ID          string
+	ChannelID   string
+	PC          *webrtc.PeerConnection
+	VideoTrack  *webrtc.TrackLocalStaticSample
+	AudioTrack  *webrtc.TrackLocalStaticSample
+	VideoSender *webrtc.RTPSender
+	AudioSender *webrtc.RTPSender
+	DataChan    *webrtc.DataChannel
+	CreatedAt   time.Time
 
 	ctx        context.Context
 	cancel     context.CancelFunc
 	h264Parser *H264Parser
+
+	// Streaming context - can be cancelled and replaced without closing the peer connection
+	streamCtx    context.Context
+	streamCancel context.CancelFunc
+	streamMu     sync.Mutex
 
 	onICECandidate func(*webrtc.ICECandidate)
 	onStateChange  func(webrtc.PeerConnectionState)
@@ -37,12 +50,20 @@ type PeerManager struct {
 
 	// Configuration
 	iceServers []webrtc.ICEServer
+	api        *webrtc.API
 }
 
 // NewPeerManager creates a new peer manager
 func NewPeerManager() *PeerManager {
+	settingEngine := webrtc.SettingEngine{}
+	settingEngine.SetInterfaceFilter(func(name string) bool {
+		// Docker bridge and virtual Ethernet interfaces are not useful to remote viewers.
+		return name != "lo" && !strings.HasPrefix(name, "docker") &&
+			!strings.HasPrefix(name, "br-") && !strings.HasPrefix(name, "veth")
+	})
 	return &PeerManager{
-		peers: make(map[string]*Peer),
+		peers:      make(map[string]*Peer),
+		api:        webrtc.NewAPI(webrtc.WithSettingEngine(settingEngine)),
 		iceServers: []webrtc.ICEServer{
 			// No STUN/TURN needed for local network
 		},
@@ -54,13 +75,27 @@ func (pm *PeerManager) SetICEServers(servers []webrtc.ICEServer) {
 	pm.iceServers = servers
 }
 
-// CreatePeer creates a new WebRTC peer for the given channel
+// CreatePeerLimited atomically enforces a process-wide peer limit.
+func (pm *PeerManager) CreatePeerLimited(channelID string, limit int) (*Peer, error) {
+	pm.mu.Lock()
+	defer pm.mu.Unlock()
+	if limit > 0 && len(pm.peers) >= limit {
+		return nil, ErrPeerLimit
+	}
+	return pm.createPeerLocked(channelID)
+}
+
+// CreatePeer creates a new WebRTC peer for the given channel.
 func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 	pm.mu.Lock()
 	defer pm.mu.Unlock()
+	return pm.createPeerLocked(channelID)
+}
 
+func (pm *PeerManager) createPeerLocked(channelID string) (*Peer, error) {
 	// Generate unique peer ID
 	peerID := fmt.Sprintf("%s-%d", channelID, time.Now().UnixNano())
+	streamID := fmt.Sprintf("tv-stream-%s", channelID)
 
 	// Create peer connection config
 	config := webrtc.Configuration{
@@ -68,7 +103,7 @@ func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 	}
 
 	// Create peer connection
-	pc, err := webrtc.NewPeerConnection(config)
+	pc, err := pm.api.NewPeerConnection(config)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create peer connection: %w", err)
 	}
@@ -79,10 +114,10 @@ func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 		webrtc.RTPCodecCapability{
 			MimeType:    webrtc.MimeTypeH264,
 			ClockRate:   H264ClockRate,
-			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=420028",
+			SDPFmtpLine: "level-asymmetry-allowed=1;packetization-mode=1;profile-level-id=64002a",
 		},
 		"video",
-		fmt.Sprintf("tv-video-%s", channelID),
+		streamID,
 	)
 	if err != nil {
 		pc.Close()
@@ -90,7 +125,8 @@ func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 	}
 
 	// Add video track to peer connection
-	if _, err := pc.AddTrack(videoTrack); err != nil {
+	videoSender, err := pc.AddTrack(videoTrack)
+	if err != nil {
 		pc.Close()
 		return nil, fmt.Errorf("failed to add video track: %w", err)
 	}
@@ -103,7 +139,7 @@ func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 			Channels:  2,
 		},
 		"audio",
-		fmt.Sprintf("tv-audio-%s", channelID),
+		streamID,
 	)
 	if err != nil {
 		pc.Close()
@@ -111,7 +147,8 @@ func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 	}
 
 	// Add audio track to peer connection
-	if _, err := pc.AddTrack(audioTrack); err != nil {
+	audioSender, err := pc.AddTrack(audioTrack)
+	if err != nil {
 		pc.Close()
 		return nil, fmt.Errorf("failed to add audio track: %w", err)
 	}
@@ -126,18 +163,23 @@ func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
+	streamCtx, streamCancel := context.WithCancel(ctx)
 
 	peer := &Peer{
-		ID:         peerID,
-		ChannelID:  channelID,
-		PC:         pc,
-		VideoTrack: videoTrack,
-		AudioTrack: audioTrack,
-		DataChan:   dataChan,
-		CreatedAt:  time.Now(),
-		ctx:        ctx,
-		cancel:     cancel,
-		h264Parser: NewH264Parser(),
+		ID:           peerID,
+		ChannelID:    channelID,
+		PC:           pc,
+		VideoTrack:   videoTrack,
+		AudioTrack:   audioTrack,
+		VideoSender:  videoSender,
+		AudioSender:  audioSender,
+		DataChan:     dataChan,
+		CreatedAt:    time.Now(),
+		ctx:          ctx,
+		cancel:       cancel,
+		streamCtx:    streamCtx,
+		streamCancel: streamCancel,
+		h264Parser:   NewH264Parser(),
 	}
 
 	// Set up ICE candidate handler
@@ -162,9 +204,22 @@ func (pm *PeerManager) CreatePeer(channelID string) (*Peer, error) {
 	})
 
 	pm.peers[peerID] = peer
+	go peer.readRTCP(videoSender)
+	go peer.readRTCP(audioSender)
 	log.Printf("[WebRTC] Created peer %s for channel %s", peerID, channelID)
 
 	return peer, nil
+}
+
+// readRTCP keeps Pion's feedback interceptors active. In particular, NACK
+// reports must be consumed so transient packet loss can be retransmitted.
+func (p *Peer) readRTCP(sender *webrtc.RTPSender) {
+	buffer := make([]byte, 1500)
+	for {
+		if _, _, err := sender.Read(buffer); err != nil {
+			return
+		}
+	}
 }
 
 // GetPeer returns a peer by ID
@@ -266,6 +321,7 @@ func (p *Peer) SendSubtitle(data []byte) error {
 // StreamH264 reads H.264 data from reader and streams to the peer
 func (p *Peer) StreamH264(reader io.Reader) error {
 	h264Reader := NewH264Reader(reader)
+	streamCtx := p.StreamContext()
 	log.Printf("[WebRTC] StreamH264 started for peer %s", p.ID)
 
 	nalCount := 0
@@ -277,8 +333,11 @@ func (p *Peer) StreamH264(reader io.Reader) error {
 
 	for {
 		select {
+		case <-streamCtx.Done():
+			log.Printf("[WebRTC] StreamH264 streaming context done for peer %s (NALs: %d, Samples: %d)", p.ID, nalCount, sampleCount)
+			return streamCtx.Err()
 		case <-p.ctx.Done():
-			log.Printf("[WebRTC] StreamH264 context done for peer %s (NALs: %d, Samples: %d)", p.ID, nalCount, sampleCount)
+			log.Printf("[WebRTC] StreamH264 peer context done for peer %s (NALs: %d, Samples: %d)", p.ID, nalCount, sampleCount)
 			return p.ctx.Err()
 		default:
 		}
@@ -348,9 +407,38 @@ func (p *Peer) StreamH264(reader io.Reader) error {
 	}
 }
 
+// StreamRawH264 reads length-prefixed H.264 access units from the native pipeline.
+func (p *Peer) StreamRawH264(reader io.Reader) error {
+	streamCtx := p.StreamContext()
+	for {
+		select {
+		case <-streamCtx.Done():
+			return streamCtx.Err()
+		case <-p.ctx.Done():
+			return p.ctx.Err()
+		default:
+		}
+		frame, err := streamframe.ReadVideo(reader)
+		if err != nil {
+			return err
+		}
+		select {
+		case <-streamCtx.Done():
+			return streamCtx.Err()
+		case <-p.ctx.Done():
+			return p.ctx.Err()
+		default:
+		}
+		if err := p.WriteVideoSample(frame.Data, frame.Duration); err != nil {
+			return err
+		}
+	}
+}
+
 // StreamOpus reads Opus audio from an OGG stream and sends to the peer
 func (p *Peer) StreamOpus(reader io.Reader) error {
 	oggReader := NewOGGReader(reader)
+	streamCtx := p.StreamContext()
 	log.Printf("[WebRTC] StreamOpus started for peer %s", p.ID)
 
 	packetCount := 0
@@ -361,8 +449,11 @@ func (p *Peer) StreamOpus(reader io.Reader) error {
 
 	for {
 		select {
+		case <-streamCtx.Done():
+			log.Printf("[WebRTC] StreamOpus streaming context done for peer %s (packets: %d)", p.ID, packetCount)
+			return streamCtx.Err()
 		case <-p.ctx.Done():
-			log.Printf("[WebRTC] StreamOpus context done for peer %s (packets: %d)", p.ID, packetCount)
+			log.Printf("[WebRTC] StreamOpus peer context done for peer %s (packets: %d)", p.ID, packetCount)
 			return p.ctx.Err()
 		default:
 		}
@@ -395,6 +486,42 @@ func (p *Peer) StreamOpus(reader io.Reader) error {
 	}
 }
 
+// StreamRawOpus reads the native pipeline's length-prefixed Opus packets.
+func (p *Peer) StreamRawOpus(reader io.Reader) error {
+	streamCtx := p.StreamContext()
+	var size [4]byte
+	for {
+		select {
+		case <-streamCtx.Done():
+			return streamCtx.Err()
+		case <-p.ctx.Done():
+			return p.ctx.Err()
+		default:
+		}
+		if _, err := io.ReadFull(reader, size[:]); err != nil {
+			return err
+		}
+		length := binary.BigEndian.Uint32(size[:])
+		if length == 0 || length > 64*1024 {
+			return fmt.Errorf("invalid native Opus packet size %d", length)
+		}
+		packet := make([]byte, length)
+		if _, err := io.ReadFull(reader, packet); err != nil {
+			return err
+		}
+		select {
+		case <-streamCtx.Done():
+			return streamCtx.Err()
+		case <-p.ctx.Done():
+			return p.ctx.Err()
+		default:
+		}
+		if err := p.WriteAudioSample(packet, 20*time.Millisecond); err != nil {
+			return err
+		}
+	}
+}
+
 // Close closes the peer connection and releases resources
 func (p *Peer) Close() {
 	p.cancel()
@@ -411,6 +538,41 @@ func (p *Peer) Close() {
 // Context returns the peer's context
 func (p *Peer) Context() context.Context {
 	return p.ctx
+}
+
+// StopStreaming cancels the current streaming context, stopping StreamH264/StreamOpus goroutines
+func (p *Peer) StopStreaming() {
+	p.streamMu.Lock()
+	defer p.streamMu.Unlock()
+
+	if p.streamCancel != nil {
+		p.streamCancel()
+		log.Printf("[WebRTC] Stopped streaming for peer %s", p.ID)
+	}
+}
+
+// RestartStreaming creates a new streaming context and returns it
+// This allows starting new StreamH264/StreamOpus goroutines without recreating the peer
+func (p *Peer) RestartStreaming() context.Context {
+	p.streamMu.Lock()
+	defer p.streamMu.Unlock()
+
+	// Cancel existing streaming context
+	if p.streamCancel != nil {
+		p.streamCancel()
+	}
+
+	// Create new streaming context
+	p.streamCtx, p.streamCancel = context.WithCancel(p.ctx)
+	log.Printf("[WebRTC] Restarted streaming context for peer %s", p.ID)
+	return p.streamCtx
+}
+
+// StreamContext returns the current streaming context
+func (p *Peer) StreamContext() context.Context {
+	p.streamMu.Lock()
+	defer p.streamMu.Unlock()
+	return p.streamCtx
 }
 
 // boolPtr returns a pointer to a bool

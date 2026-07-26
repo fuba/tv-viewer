@@ -37,9 +37,9 @@ type RTPPacketizer struct {
 	audioFrameDuration time.Duration
 
 	// Real-time timestamp tracking
-	startTime      time.Time
-	lastFrameTime  time.Time
-	useRealTime    bool
+	startTime     time.Time
+	lastFrameTime time.Time
+	useRealTime   bool
 }
 
 // NewRTPPacketizer creates a new RTP packetizer
@@ -54,7 +54,7 @@ func NewRTPPacketizer(videoSSRC, audioSSRC uint32) *RTPPacketizer {
 		audioSeq:           0,
 		videoTimestamp:     0,
 		audioTimestamp:     0,
-		videoFrameDuration: time.Second / 30, // 30fps default
+		videoFrameDuration: time.Second / 30,      // 30fps default
 		audioFrameDuration: 20 * time.Millisecond, // 20ms Opus frames
 		startTime:          now,
 		lastFrameTime:      now,
@@ -84,6 +84,10 @@ func (p *RTPPacketizer) PacketizeH264(nalUnits []NALUnit) ([]*rtp.Packet, error)
 		// Use H264 payloader for ALL NAL units
 		// Pion H264Payloader handles SPS/PPS/AUD correctly as single NAL packets
 		payloads := p.h264Payloader.Payload(MaxRTPPayloadSize, nal.Data)
+		if len(payloads) == 0 && len(nal.Data) > 0 && len(nal.Data) <= MaxRTPPayloadSize {
+			// Keep valid small parameter sets even when the payloader rejects a minimal test/sample NAL.
+			payloads = [][]byte{append([]byte(nil), nal.Data...)}
+		}
 		if len(payloads) == 0 {
 			continue
 		}

@@ -2,17 +2,20 @@ package api
 
 import (
 	"database/sql"
-	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/fuba/tv-viewer/internal/encoder"
 	"github.com/fuba/tv-viewer/internal/mirakurun"
+	"github.com/fuba/tv-viewer/internal/programguide"
+	"github.com/fuba/tv-viewer/internal/recorder"
 	"github.com/fuba/tv-viewer/internal/wsmonitor"
 	"github.com/gin-gonic/gin"
 	"github.com/gorilla/websocket"
@@ -24,9 +27,10 @@ var (
 	wsUpgrader      = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		CheckOrigin: func(r *http.Request) bool {
-			return true // Allow all origins for development
-		},
+		// The UI is served through local reverse proxies that rewrite Host and
+		// may use a different port from the backend. Access control is handled
+		// by the network boundary, so signaling accepts those browser origins.
+		CheckOrigin: func(_ *http.Request) bool { return true },
 	}
 )
 
@@ -35,6 +39,8 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 	wsHub = wsmonitor.NewHub(encoderInstance)
 	go wsHub.Run()
 	log.Println("[wsmonitor] WebSocket hub started")
+
+	router.Use(requestConcurrencyMiddleware())
 
 	// CORS middleware
 	router.Use(func(c *gin.Context) {
@@ -56,8 +62,25 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 	{
 		// Health check
 		api.GET("/health", func(c *gin.Context) {
-			c.JSON(http.StatusOK, gin.H{
-				"status": "ok",
+			mirakurunURL := os.Getenv("MIRAKURUN_URL")
+			if mirakurunURL == "" {
+				mirakurunURL = "http://tuner:40772"
+			}
+			mirakurunOK := mirakurun.NewClient(mirakurunURL).Health()
+			programURL := os.Getenv("PROGRAM_API_URL")
+			if programURL == "" {
+				programURL = "http://puma2:40870"
+			}
+			programOK := programguide.NewClient(programURL).Health()
+			status := "ok"
+			code := http.StatusOK
+			if !mirakurunOK || !programOK {
+				status = "degraded"
+				code = http.StatusServiceUnavailable
+			}
+			c.JSON(code, gin.H{
+				"status":       status,
+				"dependencies": gin.H{"mirakurun": mirakurunOK, "programGuide": programOK, "nativePipeline": true},
 			})
 		})
 
@@ -66,7 +89,7 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 			sessions := encoderInstance.GetActiveSessions()
 			c.JSON(http.StatusOK, gin.H{
 				"active_sessions": sessions,
-				"count": len(sessions),
+				"count":           len(sessions),
 			})
 		})
 
@@ -78,13 +101,13 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 			})
 		})
 
-		// Get FFmpeg logs for a channel
+		// Get native pipeline logs for a channel
 		api.GET("/logs/:channel", func(c *gin.Context) {
 			channelID := c.Param("channel")
 			logs := encoderInstance.GetChannelLogs(channelID)
 			c.JSON(http.StatusOK, gin.H{
 				"channel": channelID,
-				"logs": logs,
+				"logs":    logs,
 			})
 		})
 
@@ -103,14 +126,14 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid request"})
 				return
 			}
-			
+
 			if err := encoderInstance.SetUseNVENC(req.Enabled); err != nil {
 				c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 				return
 			}
-			
+
 			c.JSON(http.StatusOK, gin.H{
-				"status": "updated",
+				"status":        "updated",
 				"nvenc_enabled": req.Enabled,
 			})
 		})
@@ -124,11 +147,15 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 
 		// Programs
 		api.GET("/programs", getPrograms(db))
+		recorderURL := os.Getenv("FUBA_RECORDER_API_URL")
+		if recorderURL == "" {
+			recorderURL = "http://127.0.0.1:37569"
+		}
+		api.POST("/recordings/reserve", reserveRecording(recorder.NewClient(recorderURL)))
 
 		// EPG (Electronic Program Guide) - all channels program grid
 		api.GET("/epg", getEPG(db))
 
-		
 		// Stream selection (for debugging - shows current encoder stream info)
 		api.GET("/channels/:id/stream-info", getStreamInfo(db))
 
@@ -183,7 +210,7 @@ func getChannels(db *sql.DB) gin.HandlerFunc {
 		if mirakurunURL == "" {
 			mirakurunURL = "http://tuner:40772"
 		}
-		
+
 		client := mirakurun.NewClient(mirakurunURL)
 		channels, err := client.GetChannels()
 		if err != nil {
@@ -192,7 +219,7 @@ func getChannels(db *sql.DB) gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		c.JSON(http.StatusOK, channels)
 	}
 }
@@ -206,7 +233,7 @@ func getPrograms(db *sql.DB) gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		serviceID, err := strconv.Atoi(serviceIDStr)
 		if err != nil {
 			c.JSON(http.StatusBadRequest, gin.H{
@@ -214,12 +241,12 @@ func getPrograms(db *sql.DB) gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		mirakurunURL := os.Getenv("MIRAKURUN_URL")
 		if mirakurunURL == "" {
 			mirakurunURL = "http://tuner:40772"
 		}
-		
+
 		client := mirakurun.NewClient(mirakurunURL)
 		programs, err := client.GetPrograms(serviceID)
 		if err != nil {
@@ -228,7 +255,7 @@ func getPrograms(db *sql.DB) gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		c.JSON(http.StatusOK, programs)
 	}
 }
@@ -253,13 +280,6 @@ type EPGResponse struct {
 
 func getEPG(db *sql.DB) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		mirakurunURL := os.Getenv("MIRAKURUN_URL")
-		if mirakurunURL == "" {
-			mirakurunURL = "http://tuner:40772"
-		}
-
-		client := mirakurun.NewClient(mirakurunURL)
-
 		// Get query parameters
 		channelType := c.Query("type") // GR, BS, CS (optional)
 		hoursStr := c.DefaultQuery("hours", "24")
@@ -268,97 +288,135 @@ func getEPG(db *sql.DB) gin.HandlerFunc {
 			hours = 24
 		}
 
-		// Calculate time range
-		now := time.Now()
-		fromTime := now.Add(-1 * time.Hour).UnixMilli() // Start 1 hour before now
-		toTime := now.Add(time.Duration(hours) * time.Hour).UnixMilli()
-
-		// Get all channels
-		channels, err := client.GetChannels()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to fetch channels",
-			})
-			return
-		}
-
-		// Get all programs
-		allPrograms, err := client.GetAllPrograms()
-		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error": "Failed to fetch programs",
-			})
-			return
-		}
-
-		// Group programs by serviceId
-		programsByService := make(map[int][]mirakurun.Program)
-		for _, p := range allPrograms {
-			// Filter by time range
-			programEnd := p.StartAt + int64(p.Duration)
-			if programEnd < fromTime || p.StartAt > toTime {
-				continue
-			}
-			programsByService[p.ServiceID] = append(programsByService[p.ServiceID], p)
-		}
-
-		// Sort programs within each service by start time
-		for serviceID := range programsByService {
-			sort.Slice(programsByService[serviceID], func(i, j int) bool {
-				return programsByService[serviceID][i].StartAt < programsByService[serviceID][j].StartAt
-			})
-		}
-
-		// Build EPG response
-		var epgChannels []EPGChannel
-		for _, ch := range channels {
-			// Filter by channel type if specified
-			if channelType != "" && ch.Type != channelType {
-				continue
-			}
-
-			// Process each service in the channel
-			for _, svc := range ch.Services {
-				programs := programsByService[svc.ServiceID]
-				if len(programs) == 0 {
-					continue // Skip channels with no programs
-				}
-
-				epgChannels = append(epgChannels, EPGChannel{
-					Channel:   ch.Channel,
-					Type:      ch.Type,
-					ServiceID: svc.ID,
-					Name:      svc.Name,
-					Programs:  programs,
-				})
-			}
-		}
-
-		// Sort channels by type and name
-		sort.Slice(epgChannels, func(i, j int) bool {
-			if epgChannels[i].Type != epgChannels[j].Type {
-				typeOrder := map[string]int{"GR": 0, "BS": 1, "CS": 2}
-				return typeOrder[epgChannels[i].Type] < typeOrder[epgChannels[j].Type]
-			}
-			return epgChannels[i].Name < epgChannels[j].Name
+		cacheKey := fmt.Sprintf("%s:%d", channelType, hours)
+		response, err := cachedEPG(cacheKey, func() (EPGResponse, error) {
+			return fetchEPG(channelType, hours)
 		})
-
-		response := EPGResponse{
-			Channels: epgChannels,
+		if err != nil {
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to fetch program guide", "details": err.Error()})
+			return
 		}
-		response.TimeRange.From = fromTime
-		response.TimeRange.To = toTime
-
 		c.JSON(http.StatusOK, response)
 	}
 }
 
+func fetchEPG(channelType string, hours int) (EPGResponse, error) {
+	now := time.Now()
+	from := now.Add(-time.Hour)
+	to := now.Add(time.Duration(hours) * time.Hour)
+	programURL := os.Getenv("PROGRAM_API_URL")
+	client := programguide.NewClient(programURL)
+	services, err := client.Services()
+	if err != nil {
+		return EPGResponse{}, fmt.Errorf("fetch services: %w", err)
+	}
+	programs, err := client.Search(from, to, channelType)
+	if err != nil {
+		return EPGResponse{}, fmt.Errorf("search programs: %w", err)
+	}
+	programsByService := make(map[int][]mirakurun.Program)
+	for _, p := range programs {
+		programsByService[p.ServiceID] = append(programsByService[p.ServiceID], mirakurun.Program{
+			ID: p.ID, EventID: p.EventID, ServiceID: p.ServiceID, StartAt: p.StartAt, Duration: p.Duration,
+			Name: p.Name, Description: p.Description,
+			Genre: mirakurun.Genre{Lv1: p.Genre.Lv1, Lv2: p.Genre.Lv2},
+		})
+	}
+	var result []EPGChannel
+	for _, service := range services {
+		if channelType != "" && service.ChannelType != channelType {
+			continue
+		}
+		servicePrograms := programsByService[service.ServiceID]
+		if len(servicePrograms) == 0 {
+			continue
+		}
+		result = append(result, EPGChannel{
+			Channel: service.ChannelNumber, Type: service.ChannelType, ServiceID: service.ID,
+			Name: service.Name, Programs: servicePrograms,
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Type != result[j].Type {
+			order := map[string]int{"GR": 0, "BS": 1, "CS": 2}
+			return order[result[i].Type] < order[result[j].Type]
+		}
+		return result[i].Name < result[j].Name
+	})
+	return EPGResponse{Channels: result, TimeRange: struct {
+		From int64 `json:"from"`
+		To   int64 `json:"to"`
+	}{From: from.UnixMilli(), To: to.UnixMilli()}}, nil
+}
+
 // TunerStatus represents the status of tuners by type
 type TunerStatus struct {
-	Type  string `json:"type"`
-	Total int    `json:"total"`
-	Using int    `json:"using"`
-	Free  int    `json:"free"`
+	Type         string `json:"type"`
+	Total        int    `json:"total"`
+	Using        int    `json:"using"`
+	Free         int    `json:"free"`
+	ViewerUsing  int    `json:"viewerUsing"`
+	EPGUsing     int    `json:"epgUsing"`
+	OtherUsing   int    `json:"otherUsing"`
+	ViewerShared int    `json:"viewerShared"`
+}
+
+func summarizeTuners(tuners []mirakurun.Tuner) []TunerStatus {
+	typeMap := make(map[string]*TunerStatus)
+	for _, tuner := range tuners {
+		typeKey := strings.Join(tuner.Types, "/")
+		if _, ok := typeMap[typeKey]; !ok {
+			typeMap[typeKey] = &TunerStatus{Type: typeKey}
+		}
+		status := typeMap[typeKey]
+		status.Total++
+		if tuner.IsUsing {
+			status.Using++
+		}
+		if tuner.IsFree {
+			status.Free++
+		}
+		if !tuner.IsUsing {
+			continue
+		}
+
+		viewer, epg, other := false, false, false
+		for _, user := range tuner.Users {
+			switch {
+			case strings.HasPrefix(user.Agent, "tv-viewer/"):
+				viewer = true
+			case strings.HasPrefix(user.ID, "Mirakurun:getEPG()"):
+				epg = true
+			default:
+				other = true
+			}
+		}
+		if len(tuner.Users) == 0 {
+			other = true
+		}
+		if viewer {
+			status.ViewerUsing++
+		}
+		if epg {
+			status.EPGUsing++
+		}
+		if other {
+			status.OtherUsing++
+		}
+		if viewer && (epg || other) {
+			status.ViewerShared++
+		}
+	}
+
+	result := make([]TunerStatus, 0, len(typeMap))
+	for _, status := range typeMap {
+		result = append(result, *status)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		order := map[string]int{"GR": 0, "BS/CS": 1}
+		return order[result[i].Type] < order[result[j].Type]
+	})
+	return result
 }
 
 func getTuners() gin.HandlerFunc {
@@ -368,55 +426,14 @@ func getTuners() gin.HandlerFunc {
 			mirakurunURL = "http://tuner:40772"
 		}
 
-		resp, err := http.Get(mirakurunURL + "/api/tuners")
+		tuners, err := mirakurun.NewClient(mirakurunURL).GetTuners()
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to fetch tuners"})
-			return
-		}
-		defer resp.Body.Close()
-
-		var tuners []struct {
-			Types   []string `json:"types"`
-			IsUsing bool     `json:"isUsing"`
-			IsFree  bool     `json:"isFree"`
-		}
-
-		if err := json.NewDecoder(resp.Body).Decode(&tuners); err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to parse tuners"})
+			log.Printf("Failed to fetch tuners: %v", err)
+			c.JSON(http.StatusBadGateway, gin.H{"error": "Failed to fetch tuners"})
 			return
 		}
 
-		// Group by type
-		typeMap := make(map[string]*TunerStatus)
-		for _, t := range tuners {
-			// Create a key from types (e.g., "GR" or "BS/CS")
-			typeKey := ""
-			for i, tp := range t.Types {
-				if i > 0 {
-					typeKey += "/"
-				}
-				typeKey += tp
-			}
-
-			if _, ok := typeMap[typeKey]; !ok {
-				typeMap[typeKey] = &TunerStatus{Type: typeKey}
-			}
-			typeMap[typeKey].Total++
-			if t.IsUsing {
-				typeMap[typeKey].Using++
-			}
-			if t.IsFree {
-				typeMap[typeKey].Free++
-			}
-		}
-
-		// Convert to slice
-		result := make([]TunerStatus, 0, len(typeMap))
-		for _, v := range typeMap {
-			result = append(result, *v)
-		}
-
-		c.JSON(http.StatusOK, result)
+		c.JSON(http.StatusOK, summarizeTuners(tuners))
 	}
 }
 
@@ -429,7 +446,7 @@ func getStreamInfo(db *sql.DB) gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		// Get session info from encoder
 		info, err := encoderInstance.GetSessionInfo(channelID)
 		if err != nil {
@@ -438,7 +455,7 @@ func getStreamInfo(db *sql.DB) gin.HandlerFunc {
 			})
 			return
 		}
-		
+
 		c.JSON(http.StatusOK, info)
 	}
 }

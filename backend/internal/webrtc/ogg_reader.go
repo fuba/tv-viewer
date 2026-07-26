@@ -19,11 +19,11 @@ import (
 // - segment_data (sum of segment_table values)
 
 const (
-	oggSyncPattern    = "OggS"
-	oggHeaderSize     = 27
-	oggFlagContinued  = 0x01
-	oggFlagBOS        = 0x02 // Beginning of stream
-	oggFlagEOS        = 0x04 // End of stream
+	oggSyncPattern   = "OggS"
+	oggHeaderSize    = 27
+	oggFlagContinued = 0x01
+	oggFlagBOS       = 0x02 // Beginning of stream
+	oggFlagEOS       = 0x04 // End of stream
 )
 
 var (

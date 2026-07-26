@@ -8,27 +8,32 @@ import (
 
 // Message types for WebRTC signaling
 const (
-	MsgTypeOffer         = "offer"
-	MsgTypeAnswer        = "answer"
-	MsgTypeICECandidate  = "ice-candidate"
-	MsgTypeStreamStart   = "stream-start"
-	MsgTypeStreamStop    = "stream-stop"
-	MsgTypeStreamStopped = "stream-stopped" // Response to stream-stop
-	MsgTypeReady         = "ready"
-	MsgTypeError         = "error"
-	MsgTypePing          = "ping"
-	MsgTypePong          = "pong"
+	MsgTypeOffer             = "offer"
+	MsgTypeAnswer            = "answer"
+	MsgTypeICECandidate      = "ice-candidate"
+	MsgTypeStreamStart       = "stream-start"
+	MsgTypeStreamStop        = "stream-stop"
+	MsgTypeStreamStopped     = "stream-stopped"     // Response to stream-stop
+	MsgTypeRestartEncoding   = "restart-encoding"   // Restart encoding with new settings (keeps WebRTC connection)
+	MsgTypeEncodingRestarted = "encoding-restarted" // Response to restart-encoding
+	MsgTypeReady             = "ready"
+	MsgTypeError             = "error"
+	MsgTypePing              = "ping"
+	MsgTypePong              = "pong"
 )
 
 // SignalingMessage represents a WebRTC signaling message
 type SignalingMessage struct {
-	Type      string                     `json:"type"`
-	PeerID    string                     `json:"peerId,omitempty"`
-	ChannelID string                     `json:"channelId,omitempty"`
-	SDP       *webrtc.SessionDescription `json:"sdp,omitempty"`
-	Candidate *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
-	Error     string                     `json:"error,omitempty"`
-	Timestamp int64                      `json:"timestamp,omitempty"`
+	Type            string                     `json:"type"`
+	PeerID          string                     `json:"peerId,omitempty"`
+	ChannelID       string                     `json:"channelId,omitempty"`
+	RequestID       string                     `json:"requestId,omitempty"`
+	SDP             *webrtc.SessionDescription `json:"sdp,omitempty"`
+	Candidate       *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
+	Error           string                     `json:"error,omitempty"`
+	Timestamp       int64                      `json:"timestamp,omitempty"`
+	BurnInSubtitles *bool                      `json:"burnInSubtitles,omitempty"` // If true, ARIB captions are sent over the data channel
+	AudioMode       *string                    `json:"audioMode,omitempty"`       // Dual mono mode: "main", "sub", or "both"
 }
 
 // SubtitleMessage represents a subtitle event sent via DataChannel

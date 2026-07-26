@@ -28,10 +28,9 @@ type Session struct {
 	cancel           context.CancelFunc
 	outputDir        string
 	stream           io.ReadCloser
-	StreamURL        string     // URL of the source stream
-	VideoStreamIndex int        // Selected video stream index (-1 for auto)
-	AudioStreamIndex int        // Selected audio stream index (-1 for auto)
-	StreamInfo       *StreamInfo // Cached stream information
+	StreamURL        string // URL of the source stream
+	VideoStreamIndex int    // Selected video stream index (-1 for auto)
+	AudioStreamIndex int    // Selected audio stream index (-1 for auto)
 }
 
 // New creates a new Encoder instance
@@ -111,7 +110,7 @@ func (e *Encoder) GetActiveSessions() []string {
 	return channels
 }
 
-// GetChannelLogs returns FFmpeg logs for a specific channel
+// GetChannelLogs is retained for API compatibility; native pipeline logs are process logs.
 func (e *Encoder) GetChannelLogs(channelID string) []string {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -169,9 +168,6 @@ func (e *Encoder) GetSessionInfo(channelID string) (map[string]interface{}, erro
 			"stream_url":         session.StreamURL,
 			"video_stream_index": session.VideoStreamIndex,
 			"audio_stream_index": session.AudioStreamIndex,
-		}
-		if session.StreamInfo != nil {
-			info["stream_info"] = session.StreamInfo
 		}
 		return info, nil
 	}

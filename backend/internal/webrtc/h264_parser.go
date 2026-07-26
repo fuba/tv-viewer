@@ -2,8 +2,13 @@ package webrtc
 
 import (
 	"bytes"
+	"errors"
 	"io"
 )
+
+const maxH264ParserBuffer = 16 * 1024 * 1024
+
+var ErrH264BufferTooLarge = errors.New("H.264 parser buffer exceeds safety limit")
 
 // H.264 NAL unit types
 const (
@@ -46,6 +51,10 @@ var startCode4 = []byte{0x00, 0x00, 0x00, 0x01}
 // Parse reads data and extracts complete NAL units
 // Returns NAL units found and any remaining incomplete data
 func (p *H264Parser) Parse(data []byte) ([]NALUnit, error) {
+	if len(data) > maxH264ParserBuffer-len(p.buffer) {
+		p.Reset()
+		return nil, ErrH264BufferTooLarge
+	}
 	p.buffer = append(p.buffer, data...)
 
 	var nalUnits []NALUnit

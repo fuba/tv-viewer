@@ -39,8 +39,11 @@ func alignAudioPTS(current uint64, valid bool, bufferedStereoSamples int, source
 	if !valid {
 		return source & broadcastPTSMask, true, true
 	}
+	if bufferedStereoSamples < 0 {
+		bufferedStereoSamples = 0
+	}
 	bufferedFrames := bufferedStereoSamples / 2
-	expectedTail := (current + uint64(bufferedFrames)*90_000/48_000) & broadcastPTSMask
+	expectedTail := (current + uint64(bufferedFrames)*90_000/48_000) & broadcastPTSMask // #nosec G115 -- negative values are normalized above
 	delta := int64((source - expectedTail) & broadcastPTSMask)
 	if delta > int64(broadcastPTSMask/2) {
 		delta -= int64(broadcastPTSMask + 1)

@@ -316,8 +316,12 @@ func (s *SharedStream) RemovePeer(peerID string) {
 
 	sub.once.Do(func() {
 		close(sub.done)
-		sub.subtitleRead.Close()
-		sub.subtitleWrite.Close()
+		if err := sub.subtitleRead.Close(); err != nil {
+			log.Printf("Failed to close subtitle reader for peer %s: %v", peerID, err)
+		}
+		if err := sub.subtitleWrite.Close(); err != nil {
+			log.Printf("Failed to close subtitle writer for peer %s: %v", peerID, err)
+		}
 	})
 	s.mu.RLock()
 	callback := s.onPeerRemoved

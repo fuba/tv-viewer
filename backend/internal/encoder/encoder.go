@@ -51,7 +51,7 @@ func New() *Encoder {
 		if e.useNVENC {
 			log.Printf("NVENC hardware encoding enabled with encoders: %v", nvencSupport.Encoders)
 		} else {
-			log.Printf("NVENC not available, using CPU encoding (libx264)")
+			log.Printf("NVENC not available; native video streaming cannot start")
 		}
 	}
 
@@ -76,12 +76,16 @@ func (e *Encoder) stopSession(session *Session) {
 	}
 	// Close the input stream
 	if session.stream != nil {
-		session.stream.Close()
+		if err := session.stream.Close(); err != nil {
+			log.Printf("Failed to close session stream: %v", err)
+		}
 	}
 	// Give it a moment to stop gracefully
 	time.Sleep(100 * time.Millisecond)
 	if session.cmd != nil && session.cmd.Process != nil {
-		session.cmd.Process.Kill()
+		if err := session.cmd.Process.Kill(); err != nil {
+			log.Printf("Failed to kill session process: %v", err)
+		}
 	}
 }
 

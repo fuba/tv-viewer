@@ -120,14 +120,14 @@ func (pm *PeerManager) createPeerLocked(channelID string) (*Peer, error) {
 		streamID,
 	)
 	if err != nil {
-		pc.Close()
+		closePeerConnection(pc)
 		return nil, fmt.Errorf("failed to create video track: %w", err)
 	}
 
 	// Add video track to peer connection
 	videoSender, err := pc.AddTrack(videoTrack)
 	if err != nil {
-		pc.Close()
+		closePeerConnection(pc)
 		return nil, fmt.Errorf("failed to add video track: %w", err)
 	}
 
@@ -142,14 +142,14 @@ func (pm *PeerManager) createPeerLocked(channelID string) (*Peer, error) {
 		streamID,
 	)
 	if err != nil {
-		pc.Close()
+		closePeerConnection(pc)
 		return nil, fmt.Errorf("failed to create audio track: %w", err)
 	}
 
 	// Add audio track to peer connection
 	audioSender, err := pc.AddTrack(audioTrack)
 	if err != nil {
-		pc.Close()
+		closePeerConnection(pc)
 		return nil, fmt.Errorf("failed to add audio track: %w", err)
 	}
 
@@ -158,7 +158,7 @@ func (pm *PeerManager) createPeerLocked(channelID string) (*Peer, error) {
 		Ordered: boolPtr(true),
 	})
 	if err != nil {
-		pc.Close()
+		closePeerConnection(pc)
 		return nil, fmt.Errorf("failed to create data channel: %w", err)
 	}
 
@@ -527,11 +527,19 @@ func (p *Peer) Close() {
 	p.cancel()
 
 	if p.DataChan != nil {
-		p.DataChan.Close()
+		if err := p.DataChan.Close(); err != nil {
+			log.Printf("Failed to close subtitle data channel for peer %s: %v", p.ID, err)
+		}
 	}
 
 	if p.PC != nil {
-		p.PC.Close()
+		closePeerConnection(p.PC)
+	}
+}
+
+func closePeerConnection(connection *webrtc.PeerConnection) {
+	if err := connection.Close(); err != nil {
+		log.Printf("Failed to close peer connection: %v", err)
 	}
 }
 

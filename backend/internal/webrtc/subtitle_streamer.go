@@ -292,7 +292,9 @@ func (p *Peer) StreamSubtitles(reader io.Reader) error {
 		Type: "clear",
 	}
 	data, _ := json.Marshal(clearMsg)
-	p.SendSubtitle(data)
+	if err := p.SendSubtitle(data); err != nil {
+		log.Printf("[WebRTC] Failed to clear subtitles for peer %s: %v", p.ID, err)
+	}
 
 	if err := scanner.Err(); err != nil {
 		return fmt.Errorf("subtitle scanner error: %w", err)
@@ -344,7 +346,7 @@ func StreamSubtitlesToFile(ctx context.Context, reader io.Reader, textFilePath s
 			return nil // No change needed
 		}
 		currentText = text
-		return os.WriteFile(textFilePath, []byte(text), 0644)
+		return os.WriteFile(textFilePath, []byte(text), 0600)
 	}
 
 	// Cleanup goroutine to remove expired subtitles and update file
@@ -463,7 +465,9 @@ func StreamSubtitlesToFile(ctx context.Context, reader io.Reader, textFilePath s
 	}
 
 	// Clear file when stream ends
-	updateTextFile("")
+	if err := updateTextFile(""); err != nil {
+		log.Printf("[WebRTC] Failed to clear subtitle file: %v", err)
+	}
 	<-cleanupDone
 
 	if err := scanner.Err(); err != nil {
@@ -660,7 +664,9 @@ func StreamSubtitlesViaZMQ(ctx context.Context, reader io.Reader, zmqAddress str
 	}
 
 	// Clear text when stream ends
-	sendTextUpdate("")
+	if err := sendTextUpdate(""); err != nil {
+		log.Printf("[WebRTC] Failed to clear ZMQ subtitle text: %v", err)
+	}
 	<-cleanupDone
 
 	if err := scanner.Err(); err != nil {

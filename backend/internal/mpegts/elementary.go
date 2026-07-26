@@ -232,7 +232,7 @@ func (a *AACADTSAssembler) Push(packet PESPacket) ([]AudioFrame, error) {
 			HasPTS:     a.hasPTS,
 		})
 		if a.hasPTS {
-			a.nextPTS = (a.nextPTS + uint64(samples)*90_000/uint64(sampleRate)) & (1<<33 - 1)
+			a.nextPTS = (a.nextPTS + uint64(samples)*90_000/uint64(sampleRate)) & (1<<33 - 1) // #nosec G115 -- parsed ADTS values are strictly positive
 		}
 		a.consume(frameLength)
 	}
@@ -295,13 +295,16 @@ func indexStartCode(data []byte, code byte, from int) int {
 
 // BuildADTSFrame creates a small valid ADTS frame for unit tests and tools.
 func BuildADTSFrame(payload []byte, sampleRateIndex byte, channels byte) []byte {
+	if len(payload) > 0x1fff-7 {
+		return nil
+	}
 	frameLength := 7 + len(payload)
 	header := make([]byte, 7)
 	header[0] = 0xff
 	header[1] = 0xf1
 	header[2] = 0x40 | (sampleRateIndex << 2) | (channels >> 2)
-	header[3] = (channels&0x03)<<6 | byte(frameLength>>11)
-	header[4] = byte(frameLength >> 3)
+	header[3] = (channels&0x03)<<6 | byte(frameLength>>11) // #nosec G115 -- ADTS frame length is bounded above
+	header[4] = byte(frameLength >> 3)                     // #nosec G115 -- only the encoded low byte is required
 	header[5] = byte(frameLength&0x07)<<5 | 0x1f
 	header[6] = 0xfc
 	return append(header, payload...)

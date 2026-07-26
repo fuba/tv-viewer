@@ -8,6 +8,9 @@ services:
       - "18088:18088"
     environment:
       - PORT=18088
+      - BIND_ADDRESS=127.0.0.1
+      - ALLOWED_ORIGINS=http://puma2:18090,http://puma2:18089,http://localhost:18090,http://localhost:18089,http://127.0.0.1:18090,http://127.0.0.1:18089
+      - GIN_MODE=release
       - MIRAKURUN_URL=http://tuner:40772
       - PROGRAM_API_URL=http://puma2:40870
       - FUBA_RECORDER_API_URL=http://127.0.0.1:37569
@@ -29,6 +32,9 @@ services:
               capabilities: [gpu]
     restart: unless-stopped
     network_mode: host
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
 
   frontend:
     build:
@@ -40,6 +46,13 @@ services:
       - backend
     restart: unless-stopped
     network_mode: host
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+      - /var/run:uid=101,gid=101,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
 
   nginx:
     build:
@@ -51,6 +64,13 @@ services:
       - backend
     restart: unless-stopped
     network_mode: host
+    read_only: true
+    tmpfs:
+      - /var/cache/nginx:uid=101,gid=101,mode=0755
+      - /var/run:uid=101,gid=101,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop: [ALL]
 
 networks:
   tv-viewer-net:

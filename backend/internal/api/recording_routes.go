@@ -3,10 +3,7 @@ package api
 import (
 	"context"
 	"log"
-	"net"
 	"net/http"
-	"net/url"
-	"strings"
 
 	"github.com/gin-gonic/gin"
 )
@@ -17,7 +14,7 @@ type recordingReserver interface {
 
 func reserveRecording(reserver recordingReserver) gin.HandlerFunc {
 	return func(c *gin.Context) {
-		if !sameHostOrigin(c.Request) {
+		if !requestOriginAllowed(c.Request) {
 			c.JSON(http.StatusForbidden, gin.H{"error": "cross-site reservation request rejected"})
 			return
 		}
@@ -37,21 +34,4 @@ func reserveRecording(reserver recordingReserver) gin.HandlerFunc {
 		log.Printf("[Recording] Reserved program %d with fuba_recorder", request.ProgramID)
 		c.JSON(http.StatusCreated, gin.H{"status": "reserved", "programId": request.ProgramID})
 	}
-}
-
-func sameHostOrigin(request *http.Request) bool {
-	origin := request.Header.Get("Origin")
-	if origin == "" {
-		return true
-	}
-	parsed, err := url.Parse(origin)
-	if err != nil || parsed.Hostname() == "" {
-		return false
-	}
-	host := request.Host
-	if hostname, _, err := net.SplitHostPort(host); err == nil {
-		host = hostname
-	}
-	host = strings.Trim(host, "[]")
-	return strings.EqualFold(parsed.Hostname(), host)
 }

@@ -13,7 +13,7 @@ func Init(dbPath string) (*sql.DB, error) {
 
 	// Create tables
 	if err := createTables(db); err != nil {
-		db.Close()
+		_ = db.Close() // #nosec G104 -- preserve the table creation error
 		return nil, err
 	}
 

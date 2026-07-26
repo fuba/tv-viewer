@@ -1,7 +1,7 @@
 # Build stage
-FROM golang:1.22-bookworm AS builder
+FROM golang:1.26.5-bookworm AS builder
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gcc \
     libsqlite3-dev \
     libmpeg2-4-dev \
@@ -30,9 +30,9 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -tags native -o server cmd/server/main.go
 
 # Runtime stage
-FROM debian:bookworm-slim
+FROM debian:12.13-slim
 
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
     libsqlite3-0 \
     libmpeg2-4 \
@@ -43,8 +43,16 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
-COPY --from=builder /app/server .
+RUN groupadd --system --gid 10001 tvviewer \
+    && useradd --system --uid 10001 --gid tvviewer --home-dir /app tvviewer \
+    && chown tvviewer:tvviewer /app
+COPY --from=builder --chown=tvviewer:tvviewer /app/server .
+
+USER tvviewer
 
 EXPOSE 18088
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+    CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/18088; printf "GET / HTTP/1.0\r\n\r\n" >&3; head -1 <&3 | grep -q "200 OK"'
 
 CMD ["./server"]

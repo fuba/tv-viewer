@@ -20,6 +20,7 @@ import (
 	"github.com/fuba/tv-viewer/internal/mirakurun"
 	"github.com/fuba/tv-viewer/internal/webrtc"
 	"github.com/gin-gonic/gin"
+	gorillawebsocket "github.com/gorilla/websocket"
 	pionwebrtc "github.com/pion/webrtc/v4"
 )
 
@@ -229,7 +230,9 @@ func startStreamingWithRetry(ctx *streamingContext, safeWrite func(int, []byte) 
 	close(requestFinished)
 	stream = &cancelReadCloser{ReadCloser: stream, cancel: cancelRequest}
 	if ctx.isStopped() {
-		stream.Close()
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Printf("[WebRTC] Failed to close cancelled stream: %v", closeErr)
+		}
 		return context.Canceled
 	}
 
@@ -243,7 +246,9 @@ func startStreamingWithRetry(ctx *streamingContext, safeWrite func(int, []byte) 
 	log.Printf("[WebRTC] Using native Go MPEG-TS pipeline for channel %s", ctx.channelID)
 	session, err = encoderInstance.StartNativeWebRTCEncoding(ctx.channelID, stream, streamURL, target.programNumbers, ctx.burnInSubtitles, audioMode)
 	if err != nil {
-		stream.Close()
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Printf("[WebRTC] Failed to close rejected stream: %v", closeErr)
+		}
 		return fmt.Errorf("failed to start encoding: %w", err)
 	}
 
@@ -321,6 +326,10 @@ func startWebRTCStream(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
 		return
 	}
+	if !validChannelID(channelID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid channel ID"})
+		return
+	}
 
 	peer, err := peerManager.CreatePeer(channelID)
 	if err != nil {
@@ -357,12 +366,17 @@ func startWebRTCStream(c *gin.Context) {
 
 // handleWebRTCOffer handles SDP offer from client
 func handleWebRTCOffer(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 128<<10)
 	var req struct {
 		PeerID string                        `json:"peerId"`
 		SDP    pionwebrtc.SessionDescription `json:"sdp"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if !validChannelID(req.PeerID) || len(req.SDP.SDP) == 0 || len(req.SDP.SDP) > 64<<10 {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
@@ -391,12 +405,19 @@ func handleWebRTCOffer(c *gin.Context) {
 
 // handleICECandidate handles ICE candidate from client
 func handleICECandidate(c *gin.Context) {
+	c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 16<<10)
 	var req struct {
 		PeerID    string                      `json:"peerId"`
 		Candidate pionwebrtc.ICECandidateInit `json:"candidate"`
 	}
 
 	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
+		return
+	}
+	if !validChannelID(req.PeerID) || len(req.Candidate.Candidate) > 8<<10 ||
+		(req.Candidate.SDPMid != nil && len(*req.Candidate.SDPMid) > 256) ||
+		(req.Candidate.UsernameFragment != nil && len(*req.Candidate.UsernameFragment) > 256) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid request"})
 		return
 	}
@@ -421,6 +442,10 @@ func handleICECandidate(c *gin.Context) {
 // closePeer closes a WebRTC peer connection
 func closePeer(c *gin.Context) {
 	peerID := c.Param("peerId")
+	if !validChannelID(peerID) {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid peer ID"})
+		return
+	}
 
 	peer, ok := peerManager.GetPeer(peerID)
 	if !ok {
@@ -538,6 +563,11 @@ func handleWebRTCSignaling(c *gin.Context) {
 		defer wsMu.Unlock()
 		return conn.WriteControl(messageType, data, deadline)
 	}
+	writeDataSafe := func(data []byte) {
+		if err := safeWrite(gorillawebsocket.TextMessage, data); err != nil {
+			log.Printf("[WebRTC] WebSocket write failed for channel %s: %v", channelID, err)
+		}
+	}
 
 	log.Printf("[WebRTC] WebSocket connected for channel %s", channelID)
 
@@ -551,22 +581,24 @@ func handleWebRTCSignaling(c *gin.Context) {
 	sendErrorSafe := func(peerID, errorMsg string) {
 		msg := webrtc.NewErrorMessage(peerID, errorMsg)
 		data, _ := msg.ToJSON()
-		safeWrite(1, data)
+		writeDataSafe(data)
 	}
 	sendRequestErrorSafe := func(peerID, requestID, errorMsg string) {
 		msg := webrtc.NewErrorMessage(peerID, errorMsg)
 		msg.RequestID = requestID
 		data, _ := msg.ToJSON()
-		safeWrite(1, data)
+		writeDataSafe(data)
 	}
 
 	// Set initial read deadline
-	conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+	if err := conn.SetReadDeadline(time.Now().Add(wsReadTimeout)); err != nil {
+		log.Printf("[WebRTC] Failed to set initial read deadline: %v", err)
+		return
+	}
 
 	// Set pong handler to extend read deadline when pong is received
 	conn.SetPongHandler(func(string) error {
-		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
-		return nil
+		return conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
 	})
 
 	// Start server-side ping goroutine to detect dead connections
@@ -603,7 +635,10 @@ func handleWebRTCSignaling(c *gin.Context) {
 		}
 
 		// Extend read deadline on any message received
-		conn.SetReadDeadline(time.Now().Add(wsReadTimeout))
+		if err := conn.SetReadDeadline(time.Now().Add(wsReadTimeout)); err != nil {
+			log.Printf("[WebRTC] Failed to extend read deadline: %v", err)
+			break
+		}
 
 		var msg webrtc.SignalingMessage
 		if err := json.Unmarshal(message, &msg); err != nil {
@@ -671,7 +706,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 			// candidate before the remote description is installed.
 			response := webrtc.NewOfferMessage(peer.ID, *peer.PC.LocalDescription())
 			data, _ := response.ToJSON()
-			safeWrite(1, data)
+			writeDataSafe(data)
 
 			// Create streaming context with retry support
 			streamCtx = &streamingContext{
@@ -842,7 +877,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 				// Send encoding-restarted acknowledgment
 				response := &webrtc.SignalingMessage{Type: webrtc.MsgTypeEncodingRestarted, ChannelID: currentChannelID, RequestID: currentRequestID}
 				data, _ := response.ToJSON()
-				safeWrite(1, data)
+				writeDataSafe(data)
 				log.Printf("[WebRTC] Encoding restarted for channel %s", currentChannelID)
 			}()
 
@@ -862,13 +897,13 @@ func handleWebRTCSignaling(c *gin.Context) {
 			// Send stream-stopped acknowledgment
 			response := &webrtc.SignalingMessage{Type: webrtc.MsgTypeStreamStopped}
 			data, _ := response.ToJSON()
-			safeWrite(1, data)
+			writeDataSafe(data)
 			log.Printf("[WebRTC] Sent stream-stopped acknowledgment for channel %s", channelID)
 
 		case webrtc.MsgTypePing:
 			response := &webrtc.SignalingMessage{Type: webrtc.MsgTypePong}
 			data, _ := response.ToJSON()
-			safeWrite(1, data)
+			writeDataSafe(data)
 		}
 	}
 
@@ -915,13 +950,17 @@ func StartWebRTCServiceStream(c *gin.Context) {
 	// Start the direct Go MPEG-TS pipeline (stereo audio).
 	programNumber := serviceID % 100000
 	if programNumber <= 0 || programNumber > 0xffff {
-		stream.Close()
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Printf("[WebRTC] Failed to close invalid service stream: %v", closeErr)
+		}
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid MPEG-TS program number"})
 		return
 	}
 	session, err := encoderInstance.StartNativeWebRTCEncoding(sessionID, stream, streamURL, []uint16{uint16(programNumber)}, false, encoder.AudioModeBoth)
 	if err != nil {
-		stream.Close()
+		if closeErr := stream.Close(); closeErr != nil {
+			log.Printf("[WebRTC] Failed to close rejected service stream: %v", closeErr)
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{
 			"error":   "Failed to start WebRTC encoding",
 			"details": err.Error(),

@@ -59,6 +59,7 @@ func TestReserveRecordingRejectsInvalidProgramID(t *testing.T) {
 }
 
 func TestReserveRecordingRejectsCrossSiteOrigin(t *testing.T) {
+	t.Setenv("ALLOWED_ORIGINS", "http://puma2:18089")
 	gin.SetMode(gin.TestMode)
 	stub := new(recordingReserverStub)
 	router := gin.New()

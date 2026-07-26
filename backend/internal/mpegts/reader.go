@@ -167,13 +167,13 @@ func (r *Reader) nextPacket() (Packet, error) {
 		if candidate < 0 {
 			keep := PacketSize - 1
 			if len(r.buf) > keep {
-				r.record(func(s *Stats) { s.ResyncBytes += uint64(len(r.buf) - keep) })
+				r.record(func(s *Stats) { s.ResyncBytes += uint64(len(r.buf) - keep) }) // #nosec G115 -- subtraction is positive in this branch
 				r.buf = append([]byte(nil), r.buf[len(r.buf)-keep:]...)
 			}
 			continue
 		}
 		if candidate > 0 {
-			r.record(func(s *Stats) { s.ResyncBytes += uint64(candidate) })
+			r.record(func(s *Stats) { s.ResyncBytes += uint64(candidate) }) // #nosec G115 -- candidate is positive in this branch
 			r.buf = r.buf[candidate:]
 		}
 		raw := append([]byte(nil), r.buf[:PacketSize]...)

@@ -144,10 +144,10 @@ func main() {
 
 	demuxer := mpegts.NewDemuxer()
 	if *programNumber != 0 {
-		if *programNumber > 0xffff {
+		if *programNumber < 0 || *programNumber > 0xffff {
 			log.Fatalf("invalid MPEG-TS program number: %d", *programNumber)
 		}
-		demuxer = mpegts.NewDemuxerForProgram(uint16(*programNumber))
+		demuxer = mpegts.NewDemuxerForProgram(uint16(*programNumber)) // #nosec G115 -- range checked above
 	}
 	stats, readErr := demuxer.ReadPES(ctx, stream, func(packet mpegts.PESPacket) error {
 		atomic.AddUint64(&pesCount, 1)
@@ -327,7 +327,7 @@ func main() {
 }
 
 func writePPM(path string, frame nativevideo.YUVFrame) error {
-	file, err := os.Create(path)
+	file, err := os.Create(path) // #nosec G304 -- this CLI writes to the explicit operator-provided output path
 	if err != nil {
 		return err
 	}
@@ -343,7 +343,8 @@ func writePPM(path string, frame nativevideo.YUVFrame) error {
 			r := clamp(Y + (V*1436)/1024)
 			g := clamp(Y - (U*352+V*731)/1024)
 			b := clamp(Y + (U*1814)/1024)
-			if _, err := file.Write([]byte{byte(r), byte(g), byte(b)}); err != nil {
+			// Values are bounded to [0, 255] by clamp above.
+			if _, err := file.Write([]byte{byte(r), byte(g), byte(b)}); err != nil { // #nosec G115
 				return err
 			}
 		}

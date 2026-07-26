@@ -173,7 +173,9 @@ func (c *Client) GetServiceStreamContext(ctx context.Context, serviceID int64) (
 	log.Printf("Mirakurun service stream response: Status=%d, ContentLength=%d", resp.StatusCode, resp.ContentLength)
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return nil, fmt.Errorf("unexpected status code %d and failed to close response: %w", resp.StatusCode, closeErr)
+		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 
@@ -208,7 +210,9 @@ func (c *Client) GetChannelStreamWithTypeContext(ctx context.Context, channelTyp
 	log.Printf("Mirakurun stream response: Status=%d, ContentLength=%d", resp.StatusCode, resp.ContentLength)
 
 	if resp.StatusCode != http.StatusOK {
-		resp.Body.Close()
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return nil, fmt.Errorf("unexpected status code %d and failed to close response: %w", resp.StatusCode, closeErr)
+		}
 		return nil, fmt.Errorf("unexpected status code: %d", resp.StatusCode)
 	}
 

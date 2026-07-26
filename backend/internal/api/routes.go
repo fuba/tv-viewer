@@ -27,12 +27,53 @@ var (
 	wsUpgrader      = websocket.Upgrader{
 		ReadBufferSize:  1024,
 		WriteBufferSize: 1024,
-		// The UI is served through local reverse proxies that rewrite Host and
-		// may use a different port from the backend. Access control is handled
-		// by the network boundary, so signaling accepts those browser origins.
-		CheckOrigin: func(_ *http.Request) bool { return true },
+		CheckOrigin:     webSocketOriginAllowed,
 	}
 )
+
+func webSocketOriginAllowed(request *http.Request) bool {
+	return requestOriginAllowed(request)
+}
+
+func requestOriginAllowed(request *http.Request) bool {
+	origin := request.Header.Get("Origin")
+	if origin == "" {
+		return true
+	}
+
+	originURL, err := url.Parse(origin)
+	if err != nil || originURL.Hostname() == "" || (originURL.Scheme != "http" && originURL.Scheme != "https") {
+		return false
+	}
+	for _, allowed := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
+		allowedURL, parseErr := url.Parse(strings.TrimSpace(allowed))
+		if parseErr == nil && allowedURL.Scheme != "" && allowedURL.Host != "" &&
+			strings.EqualFold(originURL.Scheme, allowedURL.Scheme) &&
+			strings.EqualFold(originURL.Host, allowedURL.Host) {
+			return true
+		}
+	}
+	return false
+}
+
+func requestSecurityMiddleware() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if !strings.HasPrefix(c.Request.URL.Path, "/api/ws/") {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1<<20)
+		}
+		if c.Request.Method != http.MethodGet && c.Request.Method != http.MethodHead && c.Request.Method != http.MethodOptions {
+			if strings.EqualFold(c.GetHeader("Sec-Fetch-Site"), "cross-site") || !requestOriginAllowed(c.Request) {
+				c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "cross-site request rejected"})
+				return
+			}
+			if c.Request.ContentLength != 0 && !strings.HasPrefix(strings.ToLower(c.GetHeader("Content-Type")), "application/json") {
+				c.AbortWithStatusJSON(http.StatusUnsupportedMediaType, gin.H{"error": "application/json is required"})
+				return
+			}
+		}
+		c.Next()
+	}
+}
 
 func SetupRoutes(router *gin.Engine, db *sql.DB) {
 	// Initialize WebSocket hub for session monitoring
@@ -40,22 +81,8 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 	go wsHub.Run()
 	log.Println("[wsmonitor] WebSocket hub started")
 
+	router.Use(requestSecurityMiddleware())
 	router.Use(requestConcurrencyMiddleware())
-
-	// CORS middleware
-	router.Use(func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
-		c.Writer.Header().Set("Access-Control-Allow-Credentials", "true")
-		c.Writer.Header().Set("Access-Control-Allow-Headers", "Content-Type, Content-Length, Accept-Encoding, X-CSRF-Token, Authorization, accept, origin, Cache-Control, X-Requested-With")
-		c.Writer.Header().Set("Access-Control-Allow-Methods", "POST, OPTIONS, GET, PUT, DELETE")
-
-		if c.Request.Method == "OPTIONS" {
-			c.AbortWithStatus(204)
-			return
-		}
-
-		c.Next()
-	})
 
 	// API routes
 	api := router.Group("/api")
@@ -104,6 +131,10 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 		// Get native pipeline logs for a channel
 		api.GET("/logs/:channel", func(c *gin.Context) {
 			channelID := c.Param("channel")
+			if !validChannelID(channelID) {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "invalid channel ID"})
+				return
+			}
 			logs := encoderInstance.GetChannelLogs(channelID)
 			c.JSON(http.StatusOK, gin.H{
 				"channel": channelID,
@@ -119,6 +150,7 @@ func SetupRoutes(router *gin.Engine, db *sql.DB) {
 
 		// Toggle NVENC usage
 		api.POST("/nvenc/toggle", func(c *gin.Context) {
+			c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 1024)
 			var req struct {
 				Enabled bool `json:"enabled"`
 			}
@@ -464,6 +496,10 @@ func getStreamInfo(db *sql.DB) gin.HandlerFunc {
 func handleWebSocket(c *gin.Context) {
 	sessionID, err := url.QueryUnescape(c.Param("sessionId"))
 	if err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
+		return
+	}
+	if !validChannelID(sessionID) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid session ID"})
 		return
 	}

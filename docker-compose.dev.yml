@@ -7,10 +7,13 @@ services:
     ports:
       - "18088:18088"
     gpus: all
+    user: "${UID:-1000}:${GID:-1000}"
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
       - PORT=18088
+      - BIND_ADDRESS=0.0.0.0
+      - ALLOWED_ORIGINS=http://puma2:5173,http://localhost:5173,http://127.0.0.1:5173
       - MIRAKURUN_URL=http://tuner:40772
       - PROGRAM_API_URL=http://puma2:40870
       - FUBA_RECORDER_API_URL=http://host.docker.internal:37569
@@ -19,6 +22,8 @@ services:
       - MAX_CHANNEL_SESSIONS=1
       - MAX_HTTP_CONCURRENCY=32
       - EPG_CACHE_TTL_SECONDS=30
+      - GOCACHE=/tmp/go-build
+      - GOMODCACHE=/tmp/go-mod
     volumes:
       - ./backend:/app
       - ./data:/app/data
@@ -28,12 +33,15 @@ services:
       - tv-viewer-net
 
   frontend:
-    image: node:20-alpine
+    image: node:24.18.0-alpine3.24
+    user: "${UID:-1000}:${GID:-1000}"
     working_dir: /app
     ports:
       - "5173:5173"
     volumes:
       - ./frontend:/app
+    environment:
+      - npm_config_cache=/tmp/npm-cache
     command: sh -c "npm ci && npm run dev -- --host 0.0.0.0"
     networks:
       - tv-viewer-net

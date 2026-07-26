@@ -30,7 +30,7 @@ func WriteVideo(writer io.Writer, frame Video) error {
 		return fmt.Errorf("invalid video duration %s", frame.Duration)
 	}
 	var header [VideoHeaderSize]byte
-	binary.BigEndian.PutUint32(header[:4], uint32(len(frame.Data)))
+	binary.BigEndian.PutUint32(header[:4], uint32(len(frame.Data))) // #nosec G115 -- MaxVideoSize is below uint32 capacity
 	binary.BigEndian.PutUint32(header[4:8], uint32(micros))
 	pts := NoPTS
 	if frame.HasPTS {

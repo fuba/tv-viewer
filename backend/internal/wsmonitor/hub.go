@@ -86,7 +86,9 @@ func (h *Hub) handleRegister(client *Client) {
 	// Close existing client for same session if any
 	if existing, exists := h.clients[sessionID]; exists {
 		close(existing.send)
-		existing.conn.Close()
+		if err := existing.conn.Close(); err != nil {
+			log.Printf("[wsmonitor] Failed to close replaced client %s: %v", sessionID, err)
+		}
 	}
 
 	h.clients[sessionID] = client
@@ -265,4 +267,3 @@ func (h *Hub) GetConnectedSessions() []string {
 	}
 	return sessions
 }
-

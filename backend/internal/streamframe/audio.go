@@ -28,7 +28,7 @@ func WriteAudio(writer io.Writer, frame Audio) error {
 		return fmt.Errorf("invalid audio duration %s", frame.Duration)
 	}
 	var header [AudioHeaderSize]byte
-	binary.BigEndian.PutUint32(header[:4], uint32(len(frame.Data)))
+	binary.BigEndian.PutUint32(header[:4], uint32(len(frame.Data))) // #nosec G115 -- MaxAudioSize is below uint32 capacity
 	binary.BigEndian.PutUint32(header[4:8], uint32(micros))
 	pts := NoPTS
 	if frame.HasPTS {

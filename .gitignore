@@ -7,7 +7,6 @@
 *.test
 *.out
 /vendor/
-go.sum
 
 # Node.js
 node_modules/
@@ -49,6 +48,10 @@ Thumbs.db
 # Build output
 build/
 out/
+backend/main
+backend/server
+backend/tv-viewer-backend
+backend/tv-viewer-server
 
 # Temporary files
 *.tmp

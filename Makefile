@@ -12,20 +12,20 @@ up:
 down:
 	docker compose down
 
-# Development mode - run backend and frontend locally
+# Development mode uses the production-like Compose environment.
 dev:
-	@echo "Starting development servers..."
-	@make dev-backend & make dev-frontend
+	docker compose up -d --build backend frontend
 
 dev-backend:
-	cd backend && go run cmd/server/main.go
+	docker compose up -d --build backend
 
 dev-frontend:
-	cd frontend && npm install && npm run dev
+	docker compose up -d --build frontend
 
 # Run tests
 test:
 	cd backend && go test ./...
+	cd frontend && npm test && npm run check
 
 # Clean build artifacts and temp files
 clean:
@@ -38,7 +38,7 @@ clean:
 # Install dependencies
 deps:
 	cd backend && go mod download
-	cd frontend && npm install
+	cd frontend && npm ci
 
 # Build production images
 prod-build:
@@ -58,6 +58,3 @@ logs-backend:
 
 logs-frontend:
 	docker compose logs -f frontend
-
-logs-ffmpeg:
-	docker compose logs -f ffmpeg

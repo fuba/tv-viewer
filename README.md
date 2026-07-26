@@ -28,7 +28,7 @@
 - **🔧 監視機能**
   - WebSocket接続状態監視
   - チューナーリーク防止（接続タイムアウト処理）
-  - FFmpegリアルタイムログ表示
+  - バックエンドリアルタイムログ表示
   - API健全性チェック
 
 - **⚡ パフォーマンス**
@@ -42,7 +42,7 @@
 - **Go 1.21**: 高性能なAPIサーバー
 - **Gin Framework**: RESTful API
 - **Pion WebRTC**: WebRTCサーバー実装
-- **FFmpeg**: H.264/Opus エンコーディング
+- **Go native pipeline**: MPEG-2/TS demux、libmpeg2、AAC/Opus、NVENC
 - **SQLite**: 設定・データ管理
 
 ### フロントエンド
@@ -64,7 +64,7 @@
 │   Mirakurun     │───▶│   TV Viewer      │───▶│  Web Browser    │
 │  (TV Tuner)     │    │   Backend        │    │   (WebRTC)      │
 │                 │    │                  │    │                 │
-│ MPEG2-TS Stream │    │ Go + FFmpeg      │    │ Svelte Frontend │
+│ MPEG2-TS Stream │    │ Go native/WebRTC │    │ Svelte Frontend │
 └─────────────────┘    │ WebRTC Server    │    └─────────────────┘
                        └──────────────────┘
 ```
@@ -95,9 +95,19 @@ open http://localhost:18090
 ```bash
 # docker-compose.yml で設定
 MIRAKURUN_URL=http://tuner:40772
+PROGRAM_API_URL=http://puma2:40870
+FUBA_RECORDER_API_URL=http://127.0.0.1:37569
 PORT=18088
 ENCODING_QUALITY=medium  # high/medium/low
+
+# Resource limits (all values are configurable)
+MAX_VIEWERS=4
+MAX_CHANNEL_SESSIONS=1
+MAX_HTTP_CONCURRENCY=32
+EPG_CACHE_TTL_SECONDS=30
 ```
+
+The EPG endpoint uses the program guide service at `PROGRAM_API_URL` (`/services` and `/search`) and keeps results in memory for the configured TTL. The server permits one tuned channel at a time and fans its single encoded stream out to every viewer. New browsers automatically join the active service. While multiple viewers are connected, channel, audio, and subtitle settings are locked to keep all viewers on that shared pipeline.
 
 ## API仕様
 
@@ -109,8 +119,9 @@ ENCODING_QUALITY=medium  # high/medium/low
 | GET | `/api/channels` | チャンネル一覧取得 |
 | GET | `/api/programs?serviceId={id}` | 番組情報取得 |
 | GET | `/api/epg` | EPGデータ取得（全チャンネル） |
+| POST | `/api/recordings/reserve` | `programId`をfuba_recorderへ録画予約 |
 | GET | `/api/tuners` | チューナー状態取得 |
-| GET | `/api/logs/{channel}` | FFmpegログ取得 |
+| GET | `/api/logs/{channel}` | バックエンドログ取得 |
 | GET | `/api/sessions` | アクティブセッション一覧 |
 | POST | `/api/sessions/stop-all` | 全セッション停止 |
 
@@ -170,7 +181,7 @@ ENCODING_QUALITY=medium  # high/medium/low
 
 **問題**: 映像が表示されない
 ```bash
-# FFmpegログを確認
+# バックエンドログを確認
 docker logs tv-viewer-backend-1 -f
 ```
 
@@ -197,5 +208,5 @@ This project is licensed under CC0 (Creative Commons Zero).
 ## 謝辞
 
 - [Mirakurun](https://github.com/Chinachu/Mirakurun) - デジタル放送受信
-- [FFmpeg](https://ffmpeg.org/) - メディア変換・ストリーミング
+- [NVIDIA Video Codec SDK](https://developer.nvidia.com/video-codec-sdk) - GPU H.264エンコード
 - [Pion WebRTC](https://github.com/pion/webrtc) - Go WebRTC実装

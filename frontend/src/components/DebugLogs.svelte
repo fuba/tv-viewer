@@ -1,6 +1,6 @@
 <script lang="ts">
   export let debugLogs: string[] = []
-  export let ffmpegLogs: string[] = []
+  export let pipelineLogs: string[] = []
   export let selectedChannel: any = null
   export let streamStarted: boolean = false
 </script>
@@ -30,22 +30,22 @@
     </div>
   </div>
   
-  <!-- FFmpeg Logs -->
+  <!-- Native pipeline logs -->
   <div class="flex-1 min-h-0 flex flex-col">
     <div class="flex justify-between items-center mb-1">
-      <h3 class="text-sm font-semibold">FFmpegログ</h3>
+      <h3 class="text-sm font-semibold">配信パイプラインログ</h3>
       <button 
         class="px-2 py-1 bg-red-600 text-white rounded text-xs hover:bg-red-700"
-        on:click={() => ffmpegLogs = []}
+        on:click={() => pipelineLogs = []}
       >
         クリア
       </button>
     </div>
     <div class="bg-black rounded p-2 flex-1 overflow-y-auto">
-      {#if ffmpegLogs.length === 0}
-        <p class="text-gray-400 text-xs">FFmpegログはありません</p>
+      {#if pipelineLogs.length === 0}
+        <p class="text-gray-400 text-xs">パイプラインログはありません</p>
       {:else}
-        {#each ffmpegLogs as log}
+        {#each pipelineLogs as log}
           <div class="text-xs font-mono mb-1 text-yellow-400 whitespace-pre-wrap">
             {log}
           </div>

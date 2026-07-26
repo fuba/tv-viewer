@@ -1,7 +1,10 @@
 <script lang="ts">
   import { onMount, createEventDispatcher } from 'svelte'
+  import { channelMatchesSelection, expandChannelServices } from '../lib/channelSelection'
 
   export let selectedChannel: any = null
+  export let activeChannelId = ''
+  export let activeViewerCount = 0
 
   const dispatch = createEventDispatcher()
 
@@ -14,35 +17,7 @@
       const response = await fetch('/api/channels')
       const allChannels = await response.json()
       
-      // Process channels: For CS channels, expand services as individual items
-      const processedChannels: any[] = []
-      
-      allChannels.forEach((ch: any) => {
-        if (!ch.services || ch.services.length === 0) return
-
-        // For all channel types, if there are multiple services, expand them
-        if (ch.services.length > 1) {
-          ch.services.forEach((service: any) => {
-            processedChannels.push({
-              ...ch,
-              serviceId: service.id,  // Use Mirakurun's internal service ID
-              serviceName: service.name,
-              displayName: service.name,
-              // Keep original channel info for API calls
-              originalChannel: ch.channel,
-              isService: true
-            })
-          })
-        } else {
-          // Single service: keep as is
-          processedChannels.push({
-            ...ch,
-            displayName: ch.services[0]?.name || ch.name,
-            serviceId: ch.services[0]?.id,  // Use Mirakurun's internal service ID
-            isService: false
-          })
-        }
-      })
+      const processedChannels = expandChannelServices(allChannels)
       
       // Sort channels by type and service name for CS
       channels = processedChannels.sort((a: any, b: any) => {
@@ -73,33 +48,29 @@
   }
 </script>
 
-<div class="bg-gray-800 rounded-lg p-2 h-full flex flex-col">
-  <h2 class="text-lg font-semibold mb-2 px-2">チャンネル一覧</h2>
+<section class="channel-picker">
   
   {#if loading}
-    <p class="text-gray-400 px-2">読み込み中...</p>
+    <p class="channel-message">読み込み中...</p>
   {:else if channels.length === 0}
-    <p class="text-gray-400 px-2">チャンネルがありません</p>
+    <p class="channel-message">チャンネルがありません</p>
   {:else}
     <!-- Tab navigation -->
-    <div class="flex border-b border-gray-700 mb-2">
+    <div class="channel-tabs" role="tablist" aria-label="放送種別">
       <button 
-        class="px-3 py-1 text-sm font-medium transition-colors
-               {activeTab === 'GR' ? 'text-green-400 border-b-2 border-green-400' : 'text-gray-400 hover:text-green-300'}"
+        class:active={activeTab === 'GR'}
         on:click={() => activeTab = 'GR'}
       >
         地上波
       </button>
       <button 
-        class="px-3 py-1 text-sm font-medium transition-colors
-               {activeTab === 'BS' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-blue-300'}"
+        class:active={activeTab === 'BS'}
         on:click={() => activeTab = 'BS'}
       >
         BS
       </button>
       <button 
-        class="px-3 py-1 text-sm font-medium transition-colors
-               {activeTab === 'CS' ? 'text-purple-400 border-b-2 border-purple-400' : 'text-gray-400 hover:text-purple-300'}"
+        class:active={activeTab === 'CS'}
         on:click={() => activeTab = 'CS'}
       >
         CS ({channels.filter(ch => ch.type === 'CS').length})
@@ -107,17 +78,19 @@
     </div>
     
     <!-- Scrollable channel list -->
-    <div class="flex-1 overflow-y-auto">
-      <div class="grid {activeTab === 'CS' ? 'grid-cols-1 sm:grid-cols-2' : 'grid-cols-2 sm:grid-cols-3'} gap-1 p-1">
+    <div class="channel-grid">
         {#each channels.filter(ch => ch.type === activeTab) as channel}
+          {@const locked = activeViewerCount > 1 && !channelMatchesSelection(channel, activeChannelId)}
           <button
-            class="text-left p-2 rounded text-sm hover:bg-gray-700 transition-colors
-                   {selectedChannel?.channel === channel.channel && 
-                    selectedChannel?.serviceId === channel.serviceId ? 'bg-gray-700' : ''}"
+            class="channel-card"
+            class:locked
+            class:selected={selectedChannel?.channel === channel.channel && selectedChannel?.serviceId === channel.serviceId}
+            disabled={locked}
+            title={locked ? 'ほかの視聴者がいるためチャンネルを変更できません' : ''}
             on:click={() => selectChannel(channel)}
           >
-            <div class="font-medium truncate">{channel.displayName}</div>
-            <div class="text-xs text-gray-400 truncate">
+            <div class="channel-name">{channel.displayName}</div>
+            <div class="channel-number">
               {#if channel.type === 'CS' && channel.isService}
                 Ch.{channel.channel} - ID:{channel.serviceId}
               {:else}
@@ -126,7 +99,27 @@
             </div>
           </button>
         {/each}
-      </div>
     </div>
   {/if}
-</div>
+</section>
+
+<style>
+  .channel-picker { min-height: 12rem; }
+  .channel-message { padding: 1rem; color: var(--muted); text-align: center; }
+  .channel-tabs { display: inline-flex; gap: .25rem; padding: .25rem; margin-bottom: 1rem; border-radius: .75rem; background: var(--surface-raised); }
+  .channel-tabs button { min-height: 2.5rem; padding: 0 1rem; border-radius: .55rem; color: var(--muted); font-size: .875rem; font-weight: 650; }
+  .channel-tabs button.active { background: var(--surface-active); color: var(--text); box-shadow: 0 1px 8px rgb(0 0 0 / 18%); }
+  .channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: .55rem; max-height: min(48vh, 30rem); overflow-y: auto; padding: .1rem; }
+  .channel-card { min-height: 4.5rem; padding: .85rem; border: 1px solid var(--line); border-radius: .8rem; background: var(--surface); text-align: left; transition: border-color .15s, background .15s, transform .15s; }
+  .channel-card:hover:not(:disabled) { border-color: var(--line-strong); background: var(--surface-hover); transform: translateY(-1px); }
+  .channel-card.selected { border-color: var(--accent); background: var(--accent-soft); }
+  .channel-card.locked { opacity: .38; cursor: not-allowed; }
+  .channel-name { color: var(--text); font-size: .9rem; font-weight: 650; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .channel-number { margin-top: .4rem; color: var(--muted); font-size: .72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  @media (max-width: 640px) {
+    .channel-tabs { display: flex; }
+    .channel-tabs button { flex: 1; padding: 0 .7rem; }
+    .channel-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 52vh; }
+    .channel-card { min-height: 4rem; padding: .7rem; }
+  }
+</style>

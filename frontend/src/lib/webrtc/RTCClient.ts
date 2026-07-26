@@ -1,9 +1,11 @@
-import type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions } from './types';
+import type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode } from './types';
 
 export class RTCClient {
   private pc: RTCPeerConnection | null = null;
   private ws: WebSocket | null = null;
   private channelId: string;
+  private burnInSubtitles: boolean;
+  private audioMode: AudioMode;
   private peerId: string | null = null;
   private mediaStream: MediaStream | null = null;
   private dataChannel: RTCDataChannel | null = null;
@@ -13,14 +15,21 @@ export class RTCClient {
   private onTrack?: (track: MediaStreamTrack, stream: MediaStream) => void;
   private onConnectionStateChange?: (state: ConnectionStatus) => void;
   private onSubtitle?: (subtitle: SubtitleMessage) => void;
-  private onError?: (error: Error) => void;
+  private onEncodingRestarted?: (channelId: string, requestId?: string) => void;
+  private onError?: (error: Error, requestId?: string) => void;
   private onLog?: (message: string) => void;
+  private pendingRestarts = new Map<string, { channelId: string; burnInSubtitles: boolean; audioMode: AudioMode }>();
 
   constructor(options: RTCClientOptions) {
     this.channelId = options.channelId;
+    // Display broadcast captions by default.
+    this.burnInSubtitles = options.burnInSubtitles ?? true;
+    // Default to 'both' (stereo) for audio mode
+    this.audioMode = options.audioMode ?? 'both';
     this.onTrack = options.onTrack;
     this.onConnectionStateChange = options.onConnectionStateChange;
     this.onSubtitle = options.onSubtitle;
+    this.onEncodingRestarted = options.onEncodingRestarted;
     this.onError = options.onError;
     this.onLog = options.onLog;
   }
@@ -43,8 +52,8 @@ export class RTCClient {
       // Create PeerConnection
       this.createPeerConnection();
 
-      // Request stream start
-      this.sendMessage({ type: 'stream-start', channelId: this.channelId });
+      // Request stream start (include burnInSubtitles and audioMode settings)
+      this.sendMessage({ type: 'stream-start', channelId: this.channelId, burnInSubtitles: this.burnInSubtitles, audioMode: this.audioMode });
 
       // Start ping interval
       this.startPingInterval();
@@ -178,10 +187,18 @@ export class RTCClient {
     this.pc.ondatachannel = (event) => {
       this.log(`Data channel received: ${event.channel.label}`);
       this.dataChannel = event.channel;
+      this.dataChannel.binaryType = 'arraybuffer';
 
       this.dataChannel.onmessage = (msgEvent) => {
         try {
-          const subtitle = JSON.parse(msgEvent.data) as SubtitleMessage;
+          // Handle both string and ArrayBuffer data
+          let dataStr: string;
+          if (msgEvent.data instanceof ArrayBuffer) {
+            dataStr = new TextDecoder().decode(msgEvent.data);
+          } else {
+            dataStr = msgEvent.data;
+          }
+          const subtitle = JSON.parse(dataStr) as SubtitleMessage;
           this.onSubtitle?.(subtitle);
         } catch (e) {
           this.log(`Failed to parse subtitle: ${e}`);
@@ -221,11 +238,28 @@ export class RTCClient {
 
         case 'error':
           this.log(`Server error: ${msg.error}`);
-          this.onError?.(new Error(msg.error || 'Unknown error'));
+          if (msg.requestId) this.pendingRestarts.delete(msg.requestId);
+          this.onError?.(new Error(msg.error || 'Unknown error'), msg.requestId);
           break;
 
         case 'pong':
           // Ping response received
+          break;
+
+        case 'encoding-restarted':
+          this.log(`Encoding restarted for channel ${msg.channelId}`);
+          if (msg.requestId) {
+            const pending = this.pendingRestarts.get(msg.requestId);
+            if (pending) {
+              this.channelId = pending.channelId;
+              this.burnInSubtitles = pending.burnInSubtitles;
+              this.audioMode = pending.audioMode;
+              this.pendingRestarts.delete(msg.requestId);
+            }
+          } else if (msg.channelId) {
+            this.channelId = msg.channelId;
+          }
+          this.onEncodingRestarted?.(msg.channelId || this.channelId, msg.requestId);
           break;
       }
     } catch (e) {
@@ -367,6 +401,56 @@ export class RTCClient {
   getPeerId(): string | null {
     return this.peerId;
   }
+
+  /**
+   * Restart encoding with new settings without reconnecting WebRTC.
+   * This can be used for:
+   * - Toggling ARIB caption display
+   * - Changing channels
+   * - Switching audio mode (dual mono)
+   * @param options - New settings to apply
+   */
+  restartEncoding(options: { channelId?: string; burnInSubtitles?: boolean; audioMode?: AudioMode }): string {
+    const newChannelId = options.channelId ?? this.channelId;
+    const newBurnInSubtitles = options.burnInSubtitles ?? this.burnInSubtitles;
+    const newAudioMode = options.audioMode ?? this.audioMode;
+    const requestId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
+
+    this.log(`Restarting encoding: channel=${newChannelId}, burnInSubtitles=${newBurnInSubtitles}, audioMode=${newAudioMode}`);
+    this.pendingRestarts.set(requestId, { channelId: newChannelId, burnInSubtitles: newBurnInSubtitles, audioMode: newAudioMode });
+
+    this.sendMessage({
+      type: 'restart-encoding',
+      requestId,
+      channelId: newChannelId,
+      burnInSubtitles: newBurnInSubtitles,
+      audioMode: newAudioMode,
+    });
+    return requestId;
+  }
+
+  /**
+   * Set audio mode for dual mono streams
+   * @param mode - 'main' (left channel), 'sub' (right channel), or 'both' (stereo)
+   */
+  setAudioMode(mode: AudioMode): string {
+    this.log(`Setting audio mode: ${mode}`);
+    return this.restartEncoding({ audioMode: mode });
+  }
+
+  /**
+   * Get current ARIB caption delivery setting
+   */
+  getBurnInSubtitles(): boolean {
+    return this.burnInSubtitles;
+  }
+
+  /**
+   * Get current audio mode
+   */
+  getAudioMode(): AudioMode {
+    return this.audioMode;
+  }
 }
 
-export type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions };
+export type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode };

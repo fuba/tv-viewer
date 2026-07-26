@@ -1,6 +1,8 @@
 <script lang="ts">
   import { onMount, onDestroy, createEventDispatcher } from 'svelte'
   import type { EPGChannel, EPGProgram, EPGResponse } from '../lib/types/epg'
+  import { channelFromEPG } from '../lib/channelSelection'
+  import ProgramDetailModal from './ProgramDetailModal.svelte'
 
   const dispatch = createEventDispatcher()
 
@@ -19,6 +21,9 @@
   let activeTab: 'GR' | 'BS' | 'CS' = 'GR'
   let scrollContainer: HTMLElement
   let timeUpdateInterval: ReturnType<typeof setInterval>
+  let selectedProgram: EPGProgram | null = null
+  let selectedProgramChannel: EPGChannel | null = null
+  let isProgramModalOpen = false
 
   // Computed
   $: filteredChannels = channels.filter(ch => ch.type === activeTab)
@@ -83,14 +88,24 @@
   }
 
   function selectChannel(channel: EPGChannel) {
-    dispatch('select', {
-      channel: channel.channel,
-      type: channel.type,
-      serviceId: channel.serviceId,
-      name: channel.name,
-      displayName: channel.name,
-      services: [{ id: channel.serviceId, name: channel.name }]
-    })
+    dispatch('select', channelFromEPG(channel))
+  }
+
+  function watchProgramChannel(event: CustomEvent) {
+    dispatch('select', event.detail)
+    closeProgram()
+  }
+
+  function openProgram(program: EPGProgram, channel: EPGChannel) {
+    selectedProgram = program
+    selectedProgramChannel = channel
+    isProgramModalOpen = true
+  }
+
+  function closeProgram() {
+    isProgramModalOpen = false
+    selectedProgram = null
+    selectedProgramChannel = null
   }
 
   function scrollToCurrentTime() {
@@ -122,31 +137,28 @@
 
 <div class="epg-wrapper">
   <!-- Tab navigation -->
-  <div class="flex border-b border-gray-700 mb-2 px-2">
+  <div class="epg-tabs">
     <button
-      class="px-4 py-2 text-sm font-medium transition-colors
-             {activeTab === 'GR' ? 'text-green-400 border-b-2 border-green-400' : 'text-gray-400 hover:text-green-300'}"
+      class:active={activeTab === 'GR'}
       on:click={() => activeTab = 'GR'}
     >
       地上波 ({channels.filter(ch => ch.type === 'GR').length})
     </button>
     <button
-      class="px-4 py-2 text-sm font-medium transition-colors
-             {activeTab === 'BS' ? 'text-blue-400 border-b-2 border-blue-400' : 'text-gray-400 hover:text-blue-300'}"
+      class:active={activeTab === 'BS'}
       on:click={() => activeTab = 'BS'}
     >
       BS ({channels.filter(ch => ch.type === 'BS').length})
     </button>
     <button
-      class="px-4 py-2 text-sm font-medium transition-colors
-             {activeTab === 'CS' ? 'text-purple-400 border-b-2 border-purple-400' : 'text-gray-400 hover:text-purple-300'}"
+      class:active={activeTab === 'CS'}
       on:click={() => activeTab = 'CS'}
     >
       CS ({channels.filter(ch => ch.type === 'CS').length})
     </button>
 
     <button
-      class="ml-auto px-3 py-1 text-xs text-gray-400 hover:text-white"
+      class="epg-now"
       on:click={scrollToCurrentTime}
     >
       現在時刻へ
@@ -214,7 +226,7 @@
                     top: {getYPosition(program.startAt)}px;
                     height: {getProgramHeight(program.duration)}px;
                   "
-                  on:click={() => selectChannel(channel)}
+                  on:click={() => openProgram(program, channel)}
                   title="{formatTime(program.startAt)} - {program.name}"
                 >
                   <div class="program-time">{formatTime(program.startAt)}</div>
@@ -237,32 +249,46 @@
   {/if}
 </div>
 
+<ProgramDetailModal
+  program={selectedProgram}
+  channel={selectedProgramChannel ? channelFromEPG(selectedProgramChannel) : null}
+  isOpen={isProgramModalOpen}
+  on:close={closeProgram}
+  on:watch={watchProgramChannel}
+/>
+
 <style>
   .epg-wrapper {
     display: flex;
     flex-direction: column;
-    height: 70vh;
-    max-height: 70vh;
+    height: min(76dvh, 48rem);
+    max-height: min(76dvh, 48rem);
   }
+
+  .epg-tabs { display: flex; align-items: center; gap: .25rem; margin-bottom: .75rem; padding: .25rem; border-radius: .75rem; background: var(--surface-raised); }
+  .epg-tabs > button:not(.epg-now) { min-height: 2.4rem; padding: 0 .9rem; border-radius: .55rem; color: var(--muted); font-size: .78rem; font-weight: 650; }
+  .epg-tabs > button.active { background: var(--surface-active); color: var(--text); }
+  .epg-now { min-height: 2.4rem; margin-left: auto; padding: 0 .7rem; color: var(--accent); font-size: .75rem; }
 
   .epg-container {
     display: flex;
     flex: 1;
     overflow: hidden;
-    background: #111827;
-    border-radius: 4px;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: .8rem;
   }
 
   .time-axis {
     flex-shrink: 0;
-    background: #1f2937;
-    border-right: 1px solid #374151;
+    background: var(--surface-raised);
+    border-right: 1px solid var(--line);
     overflow: hidden;
   }
 
   .time-axis-header {
-    background: #374151;
-    border-bottom: 1px solid #4b5563;
+    background: var(--surface-active);
+    border-bottom: 1px solid var(--line);
   }
 
   .time-slots {
@@ -272,8 +298,8 @@
   .time-slot {
     padding: 4px 8px;
     font-size: 0.7rem;
-    color: #9ca3af;
-    border-bottom: 1px solid #374151;
+    color: var(--muted);
+    border-bottom: 1px solid var(--line);
     text-align: right;
   }
 
@@ -288,7 +314,7 @@
     position: sticky;
     top: 0;
     z-index: 10;
-    background: #374151;
+    background: var(--surface-active);
   }
 
   .channel-header {
@@ -297,57 +323,58 @@
     font-size: 0.7rem;
     font-weight: 500;
     text-align: center;
-    border-right: 1px solid #4b5563;
-    border-bottom: 1px solid #4b5563;
-    background: #374151;
-    color: #e5e7eb;
+    border-right: 1px solid var(--line);
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-active);
+    color: var(--text-secondary);
     cursor: pointer;
     transition: background-color 0.2s;
     overflow: hidden;
   }
 
   .channel-header:hover {
-    background: #4b5563;
+    background: var(--surface-hover);
+    color: var(--text);
   }
 
   .programs-grid {
-    background: #111827;
+    background: var(--surface);
   }
 
   .channel-column {
-    border-right: 1px solid #1f2937;
+    border-right: 1px solid var(--line);
   }
 
   .program-cell {
     position: absolute;
     left: 2px;
     right: 2px;
-    background: #1f2937;
-    border: 1px solid #374151;
-    border-radius: 2px;
+    background: var(--surface-raised);
+    border: 1px solid var(--line);
+    border-radius: .35rem;
     padding: 2px 4px;
     font-size: 0.65rem;
     text-align: left;
     overflow: hidden;
     cursor: pointer;
     transition: background-color 0.2s, border-color 0.2s;
-    color: #d1d5db;
+    color: var(--text-secondary);
   }
 
   .program-cell:hover {
-    background: #374151;
-    border-color: #60a5fa;
+    background: var(--surface-hover);
+    border-color: var(--accent);
     z-index: 5;
   }
 
   .program-cell.current {
-    border-left: 3px solid #3b82f6;
-    background: #1e3a5f;
+    border-left: 3px solid var(--accent);
+    background: var(--accent-soft);
   }
 
   .program-time {
     font-size: 0.6rem;
-    color: #9ca3af;
+    color: var(--muted);
     margin-bottom: 1px;
   }
 
@@ -364,17 +391,21 @@
     left: 0;
     right: 0;
     height: 2px;
-    background: #ef4444;
+    background: var(--accent);
     z-index: 20;
     pointer-events: none;
-    box-shadow: 0 0 4px #ef4444;
+    box-shadow: 0 0 8px rgb(119 212 222 / 55%);
   }
 
   /* Responsive adjustments */
   @media (max-width: 640px) {
     .epg-wrapper {
-      height: 60vh;
+      height: 78dvh;
+      max-height: 78dvh;
     }
+
+    .epg-tabs > button:not(.epg-now) { flex: 1; padding: 0 .45rem; }
+    .epg-now { padding: 0 .35rem; }
 
     .channel-header {
       font-size: 0.6rem;

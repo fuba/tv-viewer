@@ -35,19 +35,29 @@ func webSocketOriginAllowed(request *http.Request) bool {
 	return requestOriginAllowed(request)
 }
 
+func parseHTTPOrigin(raw string) (*url.URL, bool) {
+	parsed, err := url.Parse(raw)
+	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" ||
+		parsed.Opaque != "" || parsed.User != nil || parsed.Path != "" || parsed.RawPath != "" ||
+		parsed.RawQuery != "" || parsed.Fragment != "" {
+		return nil, false
+	}
+	return parsed, true
+}
+
 func requestOriginAllowed(request *http.Request) bool {
 	origin := request.Header.Get("Origin")
 	if origin == "" {
 		return true
 	}
 
-	originURL, err := url.Parse(origin)
-	if err != nil || originURL.Hostname() == "" || (originURL.Scheme != "http" && originURL.Scheme != "https") {
+	originURL, valid := parseHTTPOrigin(origin)
+	if !valid {
 		return false
 	}
 	for _, allowed := range strings.Split(os.Getenv("ALLOWED_ORIGINS"), ",") {
-		allowedURL, parseErr := url.Parse(strings.TrimSpace(allowed))
-		if parseErr == nil && allowedURL.Scheme != "" && allowedURL.Host != "" &&
+		allowedURL, allowedValid := parseHTTPOrigin(strings.TrimSpace(allowed))
+		if allowedValid &&
 			strings.EqualFold(originURL.Scheme, allowedURL.Scheme) &&
 			strings.EqualFold(originURL.Host, allowedURL.Host) {
 			return true

@@ -166,17 +166,11 @@
   </div>
 
   {#if loading}
-    <div class="flex items-center justify-center h-64">
-      <div class="text-gray-400">読み込み中...</div>
-    </div>
+    <p class="epg-message">読み込み中...</p>
   {:else if error}
-    <div class="flex items-center justify-center h-64">
-      <div class="text-red-400">{error}</div>
-    </div>
+    <p class="epg-message is-error">{error}</p>
   {:else if filteredChannels.length === 0}
-    <div class="flex items-center justify-center h-64">
-      <div class="text-gray-400">チャンネルがありません</div>
-    </div>
+    <p class="epg-message">チャンネルがありません</p>
   {:else}
     <div class="epg-container">
       <!-- Time axis (fixed left) -->
@@ -261,33 +255,36 @@
   .epg-wrapper {
     display: flex;
     flex-direction: column;
-    height: min(76dvh, 48rem);
-    max-height: min(76dvh, 48rem);
+    height: 100%;
   }
 
-  .epg-tabs { display: flex; align-items: center; gap: .25rem; margin-bottom: .75rem; padding: .25rem; border-radius: .75rem; background: var(--surface-raised); }
-  .epg-tabs > button:not(.epg-now) { min-height: 2.4rem; padding: 0 .9rem; border-radius: .55rem; color: var(--muted); font-size: .78rem; font-weight: 650; }
-  .epg-tabs > button.active { background: var(--surface-active); color: var(--text); }
-  .epg-now { min-height: 2.4rem; margin-left: auto; padding: 0 .7rem; color: var(--accent); font-size: .75rem; }
+  .epg-tabs { display: flex; align-items: center; gap: .2rem; padding: .35rem max(.5rem, env(safe-area-inset-left)); border-bottom: 1px solid var(--line); }
+  .epg-tabs > button:not(.epg-now) { min-height: 2.2rem; padding: 0 .75rem; border-radius: .25rem; color: var(--muted); font-size: .76rem; font-weight: 600; }
+  .epg-tabs > button:not(.epg-now):hover { color: var(--text-secondary); }
+  .epg-tabs > button.active { background: var(--accent-soft); color: var(--text); }
+  .epg-now { min-height: 2.2rem; margin-left: auto; padding: 0 .6rem; border-radius: .25rem; color: var(--text-secondary); font-size: .74rem; }
+  .epg-now:hover { background: var(--accent-soft); color: var(--text); }
+
+  .epg-message { flex: 1; display: grid; place-items: center; color: var(--muted); font-size: .85rem; }
+  .epg-message.is-error { color: var(--danger); }
 
   .epg-container {
     display: flex;
     flex: 1;
+    min-height: 0;
     overflow: hidden;
-    background: var(--surface);
-    border: 1px solid var(--line);
-    border-radius: .8rem;
+    background: var(--canvas);
   }
 
   .time-axis {
     flex-shrink: 0;
-    background: var(--surface-raised);
+    background: var(--surface);
     border-right: 1px solid var(--line);
     overflow: hidden;
   }
 
   .time-axis-header {
-    background: var(--surface-active);
+    background: var(--surface-raised);
     border-bottom: 1px solid var(--line);
   }
 
@@ -314,7 +311,7 @@
     position: sticky;
     top: 0;
     z-index: 10;
-    background: var(--surface-active);
+    background: var(--surface-raised);
   }
 
   .channel-header {
@@ -325,7 +322,7 @@
     text-align: center;
     border-right: 1px solid var(--line);
     border-bottom: 1px solid var(--line);
-    background: var(--surface-active);
+    background: var(--surface-raised);
     color: var(--text-secondary);
     cursor: pointer;
     transition: background-color 0.2s;
@@ -338,7 +335,7 @@
   }
 
   .programs-grid {
-    background: var(--surface);
+    background: var(--canvas);
   }
 
   .channel-column {
@@ -347,11 +344,11 @@
 
   .program-cell {
     position: absolute;
-    left: 2px;
-    right: 2px;
-    background: var(--surface-raised);
+    left: 1px;
+    right: 1px;
+    background: var(--surface);
     border: 1px solid var(--line);
-    border-radius: .35rem;
+    border-radius: 2px;
     padding: 2px 4px;
     font-size: 0.65rem;
     text-align: left;
@@ -368,8 +365,9 @@
   }
 
   .program-cell.current {
-    border-left: 3px solid var(--accent);
+    border-left: 2px solid var(--accent);
     background: var(--accent-soft);
+    color: var(--text);
   }
 
   .program-time {
@@ -390,20 +388,14 @@
     position: absolute;
     left: 0;
     right: 0;
-    height: 2px;
+    height: 1px;
     background: var(--accent);
     z-index: 20;
     pointer-events: none;
-    box-shadow: 0 0 8px rgb(119 212 222 / 55%);
   }
 
   /* Responsive adjustments */
   @media (max-width: 640px) {
-    .epg-wrapper {
-      height: 78dvh;
-      max-height: 78dvh;
-    }
-
     .epg-tabs > button:not(.epg-now) { flex: 1; padding: 0 .45rem; }
     .epg-now { padding: 0 .35rem; }
 

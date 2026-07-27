@@ -1,11 +1,14 @@
 <script lang="ts">
-  import { onDestroy, onMount, tick } from 'svelte'
+  import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte'
   import { RTCClient, type ConnectionStatus, type AudioMode, type SubtitleMessage } from '../lib/webrtc/RTCClient'
   import { channelSelectionId } from '../lib/channelSelection'
   import { reconnectDelay, shouldRecoverStream } from '../lib/streamRecovery'
   import { createOrientationLockCoordinator, requestViewerFullscreen, type OrientationController } from '../lib/fullscreen'
-  import { fittedFullscreenVideoSize, fittedVideoWidth } from '../lib/viewportFit'
+  import { fittedFullscreenVideoSize } from '../lib/viewportFit'
   import { normalizedVolume } from '../lib/audioVolume'
+  import TunerStatus from './TunerStatus.svelte'
+
+  const dispatch = createEventDispatcher()
 
   export let selectedChannel: any
 
@@ -13,7 +16,7 @@
   export let debugLogs: string[] = []
   export let pipelineLogs: string[] = []
 
-  // Export connection status for MetaBar
+  // Exposed so the shell can react to the connection state
   export let connectionStatus: ConnectionStatus = 'disconnected'
   export let streamStarted = false
 
@@ -51,14 +54,13 @@
   let recoveryAttempts = 0
   let destroyed = false
   let isFullscreen = false
-  let fitToWindow = true
-  let fittedWidth = 99_999
-  let fitResizeObserver: ResizeObserver | null = null
-  let fitAnimationFrame = 0
-  let fullscreenStageWidth = 0
-  let fullscreenStageHeight = 0
-  let fullscreenControlsVisible = true
-  let fullscreenControlsTimer: ReturnType<typeof setTimeout> | null = null
+  let frameResizeObserver: ResizeObserver | null = null
+  let frameAnimationFrame = 0
+  let frameWidth = 0
+  let frameHeight = 0
+  let controlsVisible = true
+  let controlsTimer: ReturnType<typeof setTimeout> | null = null
+  let barHovered = false
   const viewportSettleTimers = new Set<ReturnType<typeof setTimeout>>()
   let orientationLockCoordinator: ReturnType<typeof createOrientationLockCoordinator> | null = null
   let playerGesture: { pointerId: number, startedOutsideToolbar: boolean } | null = null
@@ -89,7 +91,6 @@
         return
       }
       if (document.fullscreenElement) return
-      updateFullscreenStageSize()
       await requestViewerFullscreen(playerShell)
       scheduleViewportSettle()
     } catch (error) {
@@ -98,48 +99,50 @@
   }
 
   function handleFullscreenChange() {
-    const wasFullscreen = isFullscreen
     isFullscreen = viewerOwnsFullscreen()
-    if (isFullscreen) {
-      revealFullscreenControls()
-    } else if (wasFullscreen) {
-      clearFullscreenControlsTimer()
-      fullscreenControlsVisible = true
-      showVolumeControl = false
-    }
+    revealControls()
     orientationLockCoordinator?.setFullscreen(isFullscreen)
     scheduleViewportSettle()
   }
 
-  function clearFullscreenControlsTimer() {
-    if (!fullscreenControlsTimer) return
-    clearTimeout(fullscreenControlsTimer)
-    fullscreenControlsTimer = null
+  function clearControlsTimer() {
+    if (!controlsTimer) return
+    clearTimeout(controlsTimer)
+    controlsTimer = null
   }
 
-  function revealFullscreenControls() {
-    if (!isFullscreen) return
-    fullscreenControlsVisible = true
-    clearFullscreenControlsTimer()
-    if (showVolumeControl) return
-    fullscreenControlsTimer = setTimeout(() => {
-      fullscreenControlsTimer = null
-      fullscreenControlsVisible = false
-    }, 3000)
+  // The bar overlays the picture, so it fades out unless something needs it on screen.
+  function revealControls() {
+    controlsVisible = true
+    clearControlsTimer()
+    if (showVolumeControl || barHovered || !selectedChannel) return
+    controlsTimer = setTimeout(() => {
+      controlsTimer = null
+      controlsVisible = false
+    }, 2600)
   }
 
-  function toggleFullscreenControls() {
-    if (!isFullscreen) return
-    if (fullscreenControlsVisible) {
-      clearFullscreenControlsTimer()
-      fullscreenControlsVisible = false
+  function toggleControls() {
+    if (controlsVisible) {
+      clearControlsTimer()
+      controlsVisible = false
       return
     }
-    revealFullscreenControls()
+    revealControls()
+  }
+
+  function handleBarPointerEnter() {
+    barHovered = true
+    revealControls()
+  }
+
+  function handleBarPointerLeave() {
+    barHovered = false
+    revealControls()
   }
 
   function eventIsInsideToolbar(event: PointerEvent) {
-    return event.target instanceof Element && Boolean(event.target.closest('.player-toolbar'))
+    return event.target instanceof Element && Boolean(event.target.closest('.player-bar'))
   }
 
   function handlePlayerPointerDown(event: PointerEvent) {
@@ -159,15 +162,12 @@
     if (!playerGesture || playerGesture.pointerId !== event.pointerId) return
     const endElement = document.elementFromPoint(event.clientX, event.clientY)
     const endedInsidePlayer = endElement instanceof Element && playerShell.contains(endElement)
-    const endedInsideToolbar = endElement instanceof Element && Boolean(endElement.closest('.player-toolbar'))
+    const endedInsideToolbar = endElement instanceof Element && Boolean(endElement.closest('.player-bar'))
     const shouldHandle = playerGesture.startedOutsideToolbar && endedInsidePlayer && !endedInsideToolbar
     cancelPlayerGesture(event)
     if (!shouldHandle) return
-    if (isFullscreen) {
-      toggleFullscreenControls()
-    } else {
-      enableAudioFromUserGesture()
-    }
+    enableAudioFromUserGesture()
+    toggleControls()
   }
 
   function cancelPlayerGesture(event?: Event) {
@@ -184,15 +184,14 @@
   }
 
   function handleToolbarFocusIn() {
-    if (!isFullscreen) return
-    fullscreenControlsVisible = true
-    clearFullscreenControlsTimer()
+    controlsVisible = true
+    clearControlsTimer()
   }
 
   function handleToolbarFocusOut(event: FocusEvent) {
     const toolbar = event.currentTarget as HTMLElement
     if (event.relatedTarget instanceof Node && toolbar.contains(event.relatedTarget)) return
-    revealFullscreenControls()
+    revealControls()
   }
 
   function clearViewportSettleTimers() {
@@ -202,63 +201,25 @@
 
   function scheduleViewportSettle() {
     clearViewportSettleTimers()
-    updateFittedWidth()
+    updateFrameSize()
     for (const delay of [100, 300]) {
       const timer = setTimeout(() => {
         viewportSettleTimers.delete(timer)
-        updateFittedWidth()
+        updateFrameSize()
       }, delay)
       viewportSettleTimers.add(timer)
     }
   }
 
-  function updateFullscreenStageSize() {
-    const viewport = window.visualViewport
-    const size = fittedFullscreenVideoSize(
-      viewport?.width ?? window.innerWidth,
-      viewport?.height ?? window.innerHeight,
-    )
-    fullscreenStageWidth = size.width
-    fullscreenStageHeight = size.height
-  }
-
-  function updateFittedWidth() {
-    cancelAnimationFrame(fitAnimationFrame)
-    fitAnimationFrame = requestAnimationFrame(() => {
-      if (!playerShell?.parentElement) return
-      const viewport = window.visualViewport
-      const viewportWidth = viewport?.width ?? window.innerWidth
-      const viewportHeight = viewport?.height ?? window.innerHeight
-      if (isFullscreen || viewerOwnsFullscreen()) {
-        updateFullscreenStageSize()
-        return
-      }
-      const topbar = document.querySelector<HTMLElement>('.topbar')
-      const metaBar = document.querySelector<HTMLElement>('.meta-bar')
-      const toolbar = playerShell.querySelector<HTMLElement>('.player-toolbar')
-      const viewerMain = playerShell.closest<HTMLElement>('.viewer-main')
-      const viewerStyle = viewerMain ? getComputedStyle(viewerMain) : null
-      const viewerPadding = viewerStyle
-        ? parseFloat(viewerStyle.paddingTop) + parseFloat(viewerStyle.paddingBottom)
-        : 0
-      const occupiedHeight = (topbar?.offsetHeight ?? 0) +
-        (metaBar?.offsetHeight ?? 0) +
-        (toolbar?.offsetHeight ?? 0) + viewerPadding
-      const containerWidth = Math.min(
-        playerShell.parentElement.clientWidth,
-        viewportWidth,
-      )
-      fittedWidth = Math.round(fittedVideoWidth(
-        containerWidth,
-        viewportHeight,
-        occupiedHeight,
-      ))
+  // Inscribe the 16:9 picture frame in the stage so it always touches two viewport edges.
+  function updateFrameSize() {
+    cancelAnimationFrame(frameAnimationFrame)
+    frameAnimationFrame = requestAnimationFrame(() => {
+      if (!videoStage) return
+      const size = fittedFullscreenVideoSize(videoStage.clientWidth, videoStage.clientHeight)
+      frameWidth = Math.round(size.width)
+      frameHeight = Math.round(size.height)
     })
-  }
-
-  function toggleWindowFit() {
-    fitToWindow = !fitToWindow
-    if (fitToWindow) updateFittedWidth()
   }
 
   function updateVolume(event: Event) {
@@ -293,11 +254,11 @@
   async function toggleVolumeControl() {
     showVolumeControl = !showVolumeControl
     if (showVolumeControl) {
-      clearFullscreenControlsTimer()
+      clearControlsTimer()
       await tick()
       volumeSlider?.focus()
     } else {
-      revealFullscreenControls()
+      revealControls()
     }
   }
 
@@ -317,20 +278,14 @@
     if (videoElement) videoElement.volume = volume
     orientationLockCoordinator = createOrientationLockCoordinator(orientationController())
     document.addEventListener('fullscreenchange', handleFullscreenChange)
-    fitResizeObserver = new ResizeObserver(updateFittedWidth)
-    for (const element of [
-      playerShell.parentElement,
-      document.querySelector('.topbar'),
-      document.querySelector('.meta-bar'),
-      playerShell.querySelector('.player-toolbar'),
-    ]) {
-      if (element) fitResizeObserver.observe(element)
-    }
-    window.addEventListener('resize', updateFittedWidth)
+    frameResizeObserver = new ResizeObserver(updateFrameSize)
+    if (videoStage) frameResizeObserver.observe(videoStage)
+    window.addEventListener('resize', updateFrameSize)
     window.addEventListener('blur', cancelPlayerGesture)
-    window.visualViewport?.addEventListener('resize', updateFittedWidth)
+    window.visualViewport?.addEventListener('resize', updateFrameSize)
     orientationController()?.addEventListener?.('change', scheduleViewportSettle)
-    updateFittedWidth()
+    updateFrameSize()
+    revealControls()
   })
 
   function clearSubtitles() {
@@ -428,6 +383,9 @@
       startStream(selectedChannel)
     }
   }
+
+  // Flash the bar on every channel change, then let it fade away again.
+  $: if (selectedChannel) revealControls()
 
   function cancelRecovery() {
     if (recoveryTimer) {
@@ -664,13 +622,13 @@
     cancelRecovery()
     cancelRecoveryStability()
     document.removeEventListener('fullscreenchange', handleFullscreenChange)
-    window.removeEventListener('resize', updateFittedWidth)
+    window.removeEventListener('resize', updateFrameSize)
     window.removeEventListener('blur', cancelPlayerGesture)
-    window.visualViewport?.removeEventListener('resize', updateFittedWidth)
+    window.visualViewport?.removeEventListener('resize', updateFrameSize)
     orientationController()?.removeEventListener?.('change', scheduleViewportSettle)
-    fitResizeObserver?.disconnect()
-    cancelAnimationFrame(fitAnimationFrame)
-    clearFullscreenControlsTimer()
+    frameResizeObserver?.disconnect()
+    cancelAnimationFrame(frameAnimationFrame)
+    clearControlsTimer()
     clearViewportSettleTimers()
     orientationLockCoordinator?.destroy()
     orientationLockCoordinator = null
@@ -703,102 +661,120 @@
 
 </script>
 
-<!-- Theater mode: full width video container -->
+<!-- Full-bleed stage: the picture fills the viewport, one bar floats on top of it. -->
 <div
   class="player-shell"
-  class:fit-window={fitToWindow}
-  class:fullscreen-controls-hidden={isFullscreen && !fullscreenControlsVisible}
-  class:volume-control-open={isFullscreen && showVolumeControl}
-  style="--fit-width: {fittedWidth}px; --fullscreen-stage-width: {fullscreenStageWidth}px; --fullscreen-stage-height: {fullscreenStageHeight}px"
+  role="presentation"
+  class:controls-hidden={!controlsVisible}
+  class:volume-control-open={showVolumeControl}
   bind:this={playerShell}
   on:pointerdown={handlePlayerPointerDown}
   on:pointerup={handlePlayerPointerUp}
   on:pointercancel={cancelPlayerGesture}
   on:lostpointercapture={cancelPlayerGesture}
+  on:pointermove={revealControls}
 >
   <div class="video-stage" bind:this={videoStage}>
     {#if selectedChannel}
-      <!-- svelte-ignore a11y-media-has-caption -->
-      <video
-        bind:this={videoElement}
-        class="w-full h-full"
-        style:object-fit={videoWidth === 1440 ? 'fill' : 'contain'}
-        controls={!isFullscreen}
-        autoplay
-        playsinline
-        muted={!audioEnabled}
-        on:volumechange={syncMediaVolume}
-        on:play={() => {
-          addLog(`Video play event, paused=${videoElement?.paused}, currentTime=${videoElement?.currentTime}`)
-        }}
-        on:playing={() => {
-          addLog(`Video playing event`)
-        }}
-        on:waiting={() => {
-          addLog(`Video waiting event (buffering)`)
-        }}
-        on:stalled={() => {
-          addLog(`Video stalled event`)
-        }}
-        on:error={() => {
-          const err = videoElement?.error
-          addLog(`Video error: ${err?.code} ${err?.message}`, 'error')
-        }}
-        on:loadeddata={() => {
-          videoWidth = videoElement?.videoWidth || 0
-          addLog(`Video loadeddata, videoWidth=${videoWidth}, videoHeight=${videoElement?.videoHeight}`)
-        }}
-      >
-      </video>
+      <div class="video-frame" style="--frame-width: {frameWidth ? `${frameWidth}px` : '100%'}; --frame-height: {frameHeight ? `${frameHeight}px` : '100%'}">
+        <!-- svelte-ignore a11y-media-has-caption -->
+        <video
+          bind:this={videoElement}
+          style:object-fit={videoWidth === 1440 ? 'fill' : 'contain'}
+          autoplay
+          playsinline
+          muted={!audioEnabled}
+          on:volumechange={syncMediaVolume}
+          on:play={() => {
+            addLog(`Video play event, paused=${videoElement?.paused}, currentTime=${videoElement?.currentTime}`)
+          }}
+          on:playing={() => {
+            addLog(`Video playing event`)
+          }}
+          on:waiting={() => {
+            addLog(`Video waiting event (buffering)`)
+          }}
+          on:stalled={() => {
+            addLog(`Video stalled event`)
+          }}
+          on:error={() => {
+            const err = videoElement?.error
+            addLog(`Video error: ${err?.code} ${err?.message}`, 'error')
+          }}
+          on:loadeddata={() => {
+            videoWidth = videoElement?.videoWidth || 0
+            addLog(`Video loadeddata, videoWidth=${videoWidth}, videoHeight=${videoElement?.videoHeight}`)
+          }}
+        >
+        </video>
 
-      {#if burnInSubtitles && subtitleText}
-        <div class="live-subtitle-layer" aria-live="polite">
-          <div class="live-subtitle-body">
-            {subtitleText}
+        {#if burnInSubtitles && subtitleText}
+          <div class="live-subtitle-layer" aria-live="polite">
+            <div class="live-subtitle-body">
+              {subtitleText}
+            </div>
           </div>
-        </div>
-      {/if}
+        {/if}
 
-      <!-- Loading indicator -->
-      {#if isStartingStream}
-        <div class="absolute inset-0 flex items-center justify-center bg-black/50">
-          <div class="text-white text-center">
-            <div class="animate-spin rounded-full h-12 w-12 border-b-2 border-white mx-auto mb-4"></div>
-            <p>WebRTC接続中...</p>
+        {#if isStartingStream}
+          <div class="stage-busy">
+            <div>
+              <div class="stage-spinner"></div>
+              接続中
+            </div>
           </div>
-        </div>
-      {/if}
-    {:else}
-      <div class="flex items-center justify-center h-full text-gray-500">
-        <p class="text-xl">チャンネルを選択してください</p>
+        {/if}
       </div>
+    {:else}
+      <p class="stage-placeholder">番組表からチャンネルを選んでください</p>
     {/if}
   </div>
 
   <div
-    class="player-toolbar"
-    aria-label="再生設定"
-    on:pointerdown={revealFullscreenControls}
-    on:pointerup={revealFullscreenControls}
+    class="player-bar"
+    role="group"
+    aria-label="再生コントロール"
+    on:pointerenter={handleBarPointerEnter}
+    on:pointerleave={handleBarPointerLeave}
+    on:pointerdown={revealControls}
+    on:pointerup={revealControls}
     on:focusin={handleToolbarFocusIn}
     on:focusout={handleToolbarFocusOut}
   >
-    <div class="toolbar-channel">
-      <span class="toolbar-status" class:connected={connectionStatus === 'connected'}></span>
-      <span>{currentChannel?.displayName || currentChannel?.name || selectedChannel?.displayName || selectedChannel?.name || 'チャンネル未選択'}</span>
-    </div>
-    <div class="toolbar-actions">
-      <button class="toolbar-button" on:click={cycleAudioMode} disabled={isStartingStream}>
-        <span class="toolbar-label">音声</span>
+    <span class="bar-channel">
+      <span class="bar-dot" class:live={connectionStatus === 'connected'}></span>
+      <span>{currentChannel?.displayName || currentChannel?.name || selectedChannel?.displayName || selectedChannel?.name || '未選択'}</span>
+    </span>
+
+    <span class="bar-spacer"></span>
+    <TunerStatus />
+
+    <div class="bar-actions">
+      <button class="bar-button" on:click={() => dispatch('openEPG')}>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="4" width="18" height="17" />
+          <path d="M3 9h18M8 3v3M16 3v3M8 14h4" />
+        </svg>
+        <span class="bar-text">番組表</span>
+      </button>
+      <button class="bar-button" on:click={() => dispatch('openChannels')}>
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="3" y="6" width="18" height="12" />
+          <path d="M8 3l4 3 4-3" />
+        </svg>
+        <span class="bar-text">チャンネル</span>
+      </button>
+      <button class="bar-button" on:click={cycleAudioMode} disabled={isStartingStream}>
+        <span class="bar-label">音声</span>
         <strong>{getAudioModeLabel(audioMode)}</strong>
       </button>
-      <button class="toolbar-button" class:active={burnInSubtitles} on:click={toggleSubtitles} disabled={isStartingStream} aria-pressed={burnInSubtitles}>
-        <span class="toolbar-label">字幕</span>
+      <button class="bar-button" class:active={burnInSubtitles} on:click={toggleSubtitles} disabled={isStartingStream} aria-pressed={burnInSubtitles}>
+        <span class="bar-label">字幕</span>
         <strong>{burnInSubtitles ? '入' : '切'}</strong>
       </button>
       <div class="volume-control">
         <button
-          class="toolbar-button volume-button"
+          class="bar-button"
           class:active={showVolumeControl}
           bind:this={volumeButton}
           on:click={toggleVolumeControl}
@@ -813,7 +789,7 @@
               <path d="M11 5 6.5 9H3v6h3.5l4.5 4V5ZM15 9.5a4 4 0 0 1 0 5M18 7a7 7 0 0 1 0 10" />
             {/if}
           </svg>
-          <span>{audioEnabled ? `${Math.round(volume * 100)}%` : '消音'}</span>
+          <span class="bar-text">{audioEnabled ? `${Math.round(volume * 100)}%` : '消音'}</span>
         </button>
         {#if showVolumeControl}
           <div class="volume-popover" id="volume-control-popover">
@@ -833,21 +809,7 @@
           </div>
         {/if}
       </div>
-      <button
-        class="toolbar-button fit-button"
-        class:active={fitToWindow}
-        on:click={toggleWindowFit}
-        aria-label={fitToWindow ? '通常サイズで表示' : 'ブラウザに合わせて表示'}
-        aria-pressed={fitToWindow}
-        title={fitToWindow ? '通常サイズに戻す' : 'ブラウザに合わせる'}
-      >
-        <svg viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="3" y="5" width="18" height="14" rx="2" />
-          <path d="M8 9H6v2M16 9h2v2M8 15H6v-2M16 15h2v-2" />
-        </svg>
-        <span>画面に合わせる</span>
-      </button>
-      <button class="toolbar-button fullscreen-button" on:click={toggleFullscreen} aria-label={isFullscreen ? '全画面を終了' : '全画面で見る'}>
+      <button class="bar-button" on:click={toggleFullscreen} aria-label={isFullscreen ? '全画面を終了' : '全画面で見る'}>
         <svg viewBox="0 0 24 24" aria-hidden="true">
           {#if isFullscreen}
             <path d="M9 3v6H3M15 3v6h6M9 21v-6H3M15 21v-6h6" />
@@ -855,7 +817,12 @@
             <path d="M8 3H3v5M16 3h5v5M8 21H3v-5M16 21h5v-5" />
           {/if}
         </svg>
-        <span>全画面</span>
+      </button>
+      <button class="bar-button" on:click={() => dispatch('openSettings')} aria-label="設定を開く">
+        <svg viewBox="0 0 24 24" aria-hidden="true">
+          <circle cx="12" cy="12" r="3" />
+          <path d="M12 3v2M12 19v2M3 12h2M19 12h2M5.6 5.6l1.4 1.4M17 17l1.4 1.4M18.4 5.6L17 7M7 17l-1.4 1.4" />
+        </svg>
       </button>
     </div>
   </div>

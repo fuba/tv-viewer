@@ -43,18 +43,13 @@
   })
 </script>
 
-<div class="fixed bottom-0 left-0 right-0 bg-gray-900/90 text-xs text-gray-400 px-2 py-1 flex justify-center gap-4 z-50">
+<div class="bar-tuners">
   {#each tuners as t}
-    <span title={tunerDetails(t)}>
-      <span class="text-gray-500">{t.type}:</span>
-      <span class="{t.viewerUsing > 0 ? 'text-green-400' : 'text-gray-500'}">視聴 {t.viewerUsing}</span>
-      <span class="text-gray-600"> · </span>
-      <span class="{t.using >= t.total ? 'text-yellow-400' : 'text-gray-400'}">全体 {t.using}/{t.total}</span>
+    <span class:tuner-live={t.viewerUsing > 0} title={tunerDetails(t)}>
+      <b>{t.type}</b> {t.using}/{t.total}
     </span>
   {/each}
   {#if tunerError}
-    <span class="text-red-400">チューナー取得不能</span>
-  {:else if tuners.length === 0}
-    <span class="text-gray-600">--</span>
+    <span class="tuner-error">チューナー取得不能</span>
   {/if}
 </div>

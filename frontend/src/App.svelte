@@ -4,16 +4,15 @@
   import ChannelList from './components/ChannelList.svelte'
   import ProgramGuide from './components/ProgramGuide.svelte'
   import OverlayPanel from './components/OverlayPanel.svelte'
-  import MetaBar from './components/MetaBar.svelte'
   import SettingsPanel from './components/SettingsPanel.svelte'
   import EPGGrid from './components/EPGGrid.svelte'
   import type { ConnectionStatus } from './lib/webrtc/types'
   import { channelMatchesSelection, resolveActiveChannel } from './lib/channelSelection'
 
   let selectedChannel: any = null
-  let showChannelPanel = true  // Open channel list by default
+  let showChannelPanel = false
   let showSettingsPanel = false
-  let showEPGPanel = false
+  let showEPGPanel = true  // The guide is the entry point, not the channel list
   let debugLogs: string[] = []
   let pipelineLogs: string[] = []
   let connectionStatus: ConnectionStatus = 'disconnected'
@@ -42,7 +41,9 @@
 		const channel = resolveActiveChannel(channels, requestedChannelId)
         if (channel) {
           selectedChannel = channel
+          // A stream is already running: go straight to the picture.
           showChannelPanel = false
+          showEPGPanel = false
         }
       }
     } catch (error) {
@@ -72,60 +73,31 @@
     videoPlayer?.enableAudioFromUserGesture()
     selectedChannel = event.detail
     showEPGPanel = false
+    showChannelPanel = false
   }
 </script>
 
 <div class="app-shell">
-  <header class="topbar">
-    <div class="brand">
-      <span class="brand-mark"></span>
-      <span>TV</span>
-    </div>
-    <nav class="topbar-actions" aria-label="メインメニュー">
-      <button
-        class="topbar-button"
-        on:click={() => showEPGPanel = true}
-      >
-        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16" />
-        </svg>
-        <span>番組表</span>
-      </button>
-      <button
-        class="topbar-button"
-        on:click={() => showChannelPanel = true}
-      >
-        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
-        </svg>
-        <span>チャンネル</span>
-      </button>
-    </nav>
-  </header>
-
-  <main class="viewer-main">
-    <div class="viewer-frame">
-      <VideoPlayer
-        bind:this={videoPlayer}
-        bind:selectedChannel
-        bind:debugLogs
-        bind:pipelineLogs
-        bind:connectionStatus
-        bind:streamStarted
-      />
-    </div>
-  </main>
-
-  <MetaBar
-    channel={selectedChannel}
-    {connectionStatus}
-    on:channelClick={() => showChannelPanel = true}
-    on:settingsClick={() => showSettingsPanel = true}
+  <VideoPlayer
+    bind:this={videoPlayer}
+    bind:selectedChannel
+    bind:debugLogs
+    bind:pipelineLogs
+    bind:connectionStatus
+    bind:streamStarted
+    on:openEPG={() => showEPGPanel = !showEPGPanel}
+    on:openChannels={() => showChannelPanel = !showChannelPanel}
+    on:openSettings={() => showSettingsPanel = !showSettingsPanel}
   />
 
+  <!-- Program guide (primary entry point) -->
+  <OverlayPanel bind:isOpen={showEPGPanel} title="番組表">
+    <EPGGrid on:select={handleEPGSelect} />
+  </OverlayPanel>
+
   <!-- Channel selection overlay -->
-  <OverlayPanel bind:isOpen={showChannelPanel} title="チャンネル選択">
-    <div class="panel-stack">
+  <OverlayPanel bind:isOpen={showChannelPanel} title="チャンネル">
+    <div class="panel-body panel-stack">
       <ChannelList bind:selectedChannel {activeChannelId} {activeViewerCount} on:select={handleChannelSelect} />
       <div class="panel-divider">
         <ProgramGuide channel={selectedChannel} on:select={handleEPGSelect} />
@@ -135,16 +107,13 @@
 
   <!-- Settings overlay -->
   <OverlayPanel bind:isOpen={showSettingsPanel} title="設定">
-    <SettingsPanel
-      {selectedChannel}
-      bind:debugLogs
-      bind:pipelineLogs
-      {streamStarted}
-    />
-  </OverlayPanel>
-
-  <!-- EPG (Program Guide Grid) overlay -->
-  <OverlayPanel bind:isOpen={showEPGPanel} title="番組表" fullWidth={true}>
-    <EPGGrid on:select={handleEPGSelect} />
+    <div class="panel-body">
+      <SettingsPanel
+        {selectedChannel}
+        bind:debugLogs
+        bind:pipelineLogs
+        {streamStarted}
+      />
+    </div>
   </OverlayPanel>
 </div>

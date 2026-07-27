@@ -36,7 +36,9 @@
   let tracksReceived = 0
   let videoReadyState = 0
   let streamSequence = 0 // Used to ignore callbacks from old streams
-  let videoWidth = 0 // Track video width for aspect ratio handling
+  // Intrinsic size of the decoded picture, used to shape the video frame.
+  let videoWidth = 0
+  let videoHeight = 0
 
   // Subtitle mode: true = display ARIB captions, false = hide captions
   let burnInSubtitles = true
@@ -49,6 +51,7 @@
   let subtitleText = ''
   const subtitleTimers = new Map<string, ReturnType<typeof setTimeout>>()
   let pipelineLogTimer: ReturnType<typeof setTimeout> | null = null
+  let intrinsicSyncTimer: ReturnType<typeof setInterval> | null = null
   let recoveryTimer: ReturnType<typeof setTimeout> | null = null
   let recoveryStableTimer: ReturnType<typeof setTimeout> | null = null
   let recoveryAttempts = 0
@@ -79,6 +82,19 @@
     return (screen as Screen & { orientation?: OrientationController }).orientation
   }
 
+  // iOS Safari cannot fullscreen a container element; it only exposes the native
+  // video player, which rotates itself to match the picture on a phone.
+  type NativeFullscreenVideo = HTMLVideoElement & {
+    webkitEnterFullscreen?: () => void
+    webkitExitFullscreen?: () => void
+    webkitDisplayingFullscreen?: boolean
+  }
+
+  function nativeFullscreenVideo(): NativeFullscreenVideo | null {
+    const video = videoElement as NativeFullscreenVideo | undefined
+    return video?.webkitEnterFullscreen ? video : null
+  }
+
   function viewerOwnsFullscreen() {
     return document.fullscreenElement === playerShell
   }
@@ -90,9 +106,22 @@
         scheduleViewportSettle()
         return
       }
+      const nativeVideo = nativeFullscreenVideo()
+      if (nativeVideo?.webkitDisplayingFullscreen) {
+        nativeVideo.webkitExitFullscreen?.()
+        return
+      }
       if (document.fullscreenElement) return
-      await requestViewerFullscreen(playerShell)
-      scheduleViewportSettle()
+      if (typeof playerShell.requestFullscreen === 'function') {
+        await requestViewerFullscreen(playerShell)
+        scheduleViewportSettle()
+        return
+      }
+      if (nativeVideo) {
+        nativeVideo.webkitEnterFullscreen?.()
+        return
+      }
+      addLog('Fullscreen is not supported by this browser', 'error')
     } catch (error) {
       addLog(`Fullscreen failed: ${error instanceof Error ? error.message : error}`, 'error')
     }
@@ -103,6 +132,30 @@
     revealControls()
     orientationLockCoordinator?.setFullscreen(isFullscreen)
     scheduleViewportSettle()
+  }
+
+  function handleNativeFullscreenEnter() {
+    isFullscreen = true
+    orientationLockCoordinator?.setFullscreen(true)
+  }
+
+  function handleNativeFullscreenExit() {
+    isFullscreen = false
+    orientationLockCoordinator?.setFullscreen(false)
+    revealControls()
+    scheduleViewportSettle()
+  }
+
+  // Svelte's DOM typings do not know the iOS-only fullscreen events.
+  function nativeFullscreenEvents(node: HTMLVideoElement) {
+    node.addEventListener('webkitbeginfullscreen', handleNativeFullscreenEnter)
+    node.addEventListener('webkitendfullscreen', handleNativeFullscreenExit)
+    return {
+      destroy() {
+        node.removeEventListener('webkitbeginfullscreen', handleNativeFullscreenEnter)
+        node.removeEventListener('webkitendfullscreen', handleNativeFullscreenExit)
+      },
+    }
   }
 
   function clearControlsTimer() {
@@ -211,15 +264,34 @@
     }
   }
 
-  // Inscribe the 16:9 picture frame in the stage so it always touches two viewport edges.
+  // Japanese HD broadcasts are coded as 1440x1080 with a 16:9 display aspect.
+  $: anamorphic = videoWidth === 1440 && videoHeight === 1080
+  $: displayAspect = anamorphic || !videoWidth || !videoHeight ? 16 / 9 : videoWidth / videoHeight
+  $: displayAspect, updateFrameSize()
+
+  // Inscribe the picture frame in the stage so the video always touches two viewport
+  // edges. The frame follows the broadcast aspect, so the picture is never boxed twice.
   function updateFrameSize() {
     cancelAnimationFrame(frameAnimationFrame)
     frameAnimationFrame = requestAnimationFrame(() => {
       if (!videoStage) return
-      const size = fittedFullscreenVideoSize(videoStage.clientWidth, videoStage.clientHeight)
+      const size = fittedFullscreenVideoSize(videoStage.clientWidth, videoStage.clientHeight, displayAspect)
       frameWidth = Math.round(size.width)
       frameHeight = Math.round(size.height)
     })
+  }
+
+  // restart-encoding reuses the media track, so loadeddata never fires again on a
+  // channel change, and a renegotiation can leave the element reporting a size we
+  // never got an event for. Reconcile from the element instead of trusting events.
+  function syncIntrinsicSize() {
+    if (!videoElement) return
+    const width = videoElement.videoWidth || 0
+    const height = videoElement.videoHeight || 0
+    if (width === videoWidth && height === videoHeight) return
+    videoWidth = width
+    videoHeight = height
+    addLog(`Video size: ${width}x${height}`)
   }
 
   function updateVolume(event: Event) {
@@ -286,6 +358,7 @@
     orientationController()?.addEventListener?.('change', scheduleViewportSettle)
     updateFrameSize()
     revealControls()
+    intrinsicSyncTimer = setInterval(syncIntrinsicSize, 1000)
   })
 
   function clearSubtitles() {
@@ -446,7 +519,6 @@
     isStartingStream = true
     const startTime = Date.now()
     tracksReceived = 0
-    videoWidth = 0
 
     const channelId = channelSelectionId(channel)
 
@@ -488,6 +560,8 @@
 
     if (videoElement) {
       videoElement.srcObject = null
+      videoWidth = 0
+      videoHeight = 0
     }
 
     connectionStatus = 'disconnected'
@@ -576,6 +650,7 @@
           }
           addLog(`Encoding restarted for channel ${newChannelId}`, 'success')
           isStartingStream = false
+          syncIntrinsicSize()
           schedulePipelineLogs(newChannelId)
         },
         onSubtitle: handleSubtitle,
@@ -633,6 +708,7 @@
     orientationLockCoordinator?.destroy()
     orientationLockCoordinator = null
     clearSubtitles()
+    if (intrinsicSyncTimer) clearInterval(intrinsicSyncTimer)
     if (pipelineLogTimer) clearTimeout(pipelineLogTimer)
     if (rtcClient) {
       rtcClient.disconnect()
@@ -680,15 +756,19 @@
         <!-- svelte-ignore a11y-media-has-caption -->
         <video
           bind:this={videoElement}
-          style:object-fit={videoWidth === 1440 ? 'fill' : 'contain'}
+          style:object-fit={anamorphic ? 'fill' : 'contain'}
           autoplay
           playsinline
           muted={!audioEnabled}
           on:volumechange={syncMediaVolume}
+          on:resize={syncIntrinsicSize}
+          on:loadedmetadata={syncIntrinsicSize}
+          use:nativeFullscreenEvents
           on:play={() => {
             addLog(`Video play event, paused=${videoElement?.paused}, currentTime=${videoElement?.currentTime}`)
           }}
           on:playing={() => {
+            syncIntrinsicSize()
             addLog(`Video playing event`)
           }}
           on:waiting={() => {
@@ -702,8 +782,8 @@
             addLog(`Video error: ${err?.code} ${err?.message}`, 'error')
           }}
           on:loadeddata={() => {
-            videoWidth = videoElement?.videoWidth || 0
-            addLog(`Video loadeddata, videoWidth=${videoWidth}, videoHeight=${videoElement?.videoHeight}`)
+            syncIntrinsicSize()
+            addLog(`Video loadeddata, videoWidth=${videoWidth}, videoHeight=${videoHeight}`)
           }}
         >
         </video>

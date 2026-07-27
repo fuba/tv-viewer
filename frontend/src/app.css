@@ -139,6 +139,14 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .bar-tuners { display: none; }
 }
 
+/* Phone in landscape (typically fullscreen): give the picture every pixel we can. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .player-shell { --bar-height: 2.4rem; }
+  .player-bar { gap: .15rem; }
+  .bar-button { min-height: 2.1rem; padding: 0 .4rem; }
+  .bar-label, .bar-text, .bar-tuners { display: none; }
+}
+
 @media (max-width: 640px) {
   .player-bar { gap: .25rem; padding-left: max(.6rem, env(safe-area-inset-left)); }
   .bar-channel { max-width: 34%; font-size: .74rem; }

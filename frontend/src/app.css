@@ -115,6 +115,21 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .volume-popover input { width: 100%; accent-color: var(--accent); }
 .volume-popover output { min-width: 2.4rem; color: var(--text-secondary); font-size: .7rem; text-align: right; }
 
+.app-notice {
+  position: fixed;
+  left: 50%;
+  bottom: calc(var(--bar-height, 2.9rem) + env(safe-area-inset-bottom) + 1rem);
+  z-index: 45;
+  max-width: min(90vw, 28rem);
+  padding: .55rem .8rem;
+  transform: translateX(-50%);
+  border: 1px solid var(--line-strong);
+  background: #000;
+  color: var(--text);
+  font-size: .78rem;
+  text-align: center;
+}
+
 /* Overlays are full-bleed sheets: no rounded cards, no blur. */
 .panel-backdrop { position: fixed; inset: 0; z-index: 50; display: flex; background: rgb(0 0 0 / 80%); }
 .overlay-panel { display: flex; flex: 1; flex-direction: column; min-width: 0; overflow: hidden; background: var(--canvas); }

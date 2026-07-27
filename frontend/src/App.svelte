@@ -22,6 +22,14 @@
   let activeViewerCount = 0
   let activeStatusTimer: ReturnType<typeof setInterval> | null = null
   let activeRefreshGeneration = 0
+  let notice = ''
+  let noticeTimer: ReturnType<typeof setTimeout> | null = null
+
+  function showNotice(message: string) {
+    notice = message
+    if (noticeTimer) clearTimeout(noticeTimer)
+    noticeTimer = setTimeout(() => { notice = '' }, 4000)
+  }
 
   async function refreshActiveChannel(autoSelect = false) {
 	const generation = ++activeRefreshGeneration
@@ -58,6 +66,7 @@
 
   onDestroy(() => {
     if (activeStatusTimer) clearInterval(activeStatusTimer)
+    if (noticeTimer) clearTimeout(noticeTimer)
   })
 
   function handleChannelSelect() {
@@ -67,7 +76,9 @@
 
   function handleEPGSelect(event: CustomEvent) {
     if (activeViewerCount > 1 && !channelMatchesSelection(event.detail, activeChannelId)) {
+      // Silently ignoring the tap reads as a broken app; say who is holding the channel.
       debugLogs = [`[${new Date().toLocaleTimeString()}] Channel is locked by other viewers`, ...debugLogs]
+      showNotice(`ほかに ${activeViewerCount - 1} 人が視聴中のため、チャンネルを変更できません`)
       return
     }
     videoPlayer?.enableAudioFromUserGesture()
@@ -89,6 +100,10 @@
     on:openChannels={() => showChannelPanel = !showChannelPanel}
     on:openSettings={() => showSettingsPanel = !showSettingsPanel}
   />
+
+  {#if notice}
+    <p class="app-notice" role="status">{notice}</p>
+  {/if}
 
   <!-- Program guide (primary entry point) -->
   <OverlayPanel bind:isOpen={showEPGPanel} title="番組表">

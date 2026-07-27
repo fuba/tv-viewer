@@ -51,7 +51,8 @@
   let subtitleText = ''
   const subtitleTimers = new Map<string, ReturnType<typeof setTimeout>>()
   let pipelineLogTimer: ReturnType<typeof setTimeout> | null = null
-  let intrinsicSyncTimer: ReturnType<typeof setInterval> | null = null
+  let startWatchdogTimer: ReturnType<typeof setTimeout> | null = null
+  let startWatchdogReleases = 0
   let recoveryTimer: ReturnType<typeof setTimeout> | null = null
   let recoveryStableTimer: ReturnType<typeof setTimeout> | null = null
   let recoveryAttempts = 0
@@ -77,6 +78,8 @@
 
   const maximumRecoveryAttempts = 5
   const recoveryStablePeriod = 120_000
+  const startWatchdogPeriod = 12_000
+  const maximumStartWatchdogReleases = 3
 
   function orientationController(): OrientationController | undefined {
     return (screen as Screen & { orientation?: OrientationController }).orientation
@@ -252,6 +255,33 @@
     viewportSettleTimers.clear()
   }
 
+  function clearStartWatchdog() {
+    if (!startWatchdogTimer) return
+    clearTimeout(startWatchdogTimer)
+    startWatchdogTimer = null
+  }
+
+  // A switch that never reports back would otherwise leave isStartingStream latched
+  // and every later channel change silently ignored.
+  function beginStartAttempt() {
+    isStartingStream = true
+    clearStartWatchdog()
+    if (startWatchdogReleases >= maximumStartWatchdogReleases) return
+    startWatchdogTimer = setTimeout(() => {
+      startWatchdogTimer = null
+      if (destroyed || !isStartingStream) return
+      startWatchdogReleases++
+      pendingRestart = null
+      addLog(`Channel switch did not complete in ${startWatchdogPeriod / 1000}s; releasing the switch lock`, 'error')
+      isStartingStream = false
+    }, startWatchdogPeriod)
+  }
+
+  function settleStartAttempt() {
+    isStartingStream = false
+    clearStartWatchdog()
+  }
+
   function scheduleViewportSettle() {
     clearViewportSettleTimers()
     updateFrameSize()
@@ -264,13 +294,15 @@
     }
   }
 
-  // Japanese HD broadcasts are coded as 1440x1080 with a 16:9 display aspect.
-  $: anamorphic = videoWidth === 1440 && videoHeight === 1080
-  $: displayAspect = anamorphic || !videoWidth || !videoHeight ? 16 / 9 : videoWidth / videoHeight
-  $: displayAspect, updateFrameSize()
+  // Every channel is broadcast for a 16:9 display and the encoder tags its output as
+  // 16:9 (nvenc_native.go), but the coded size varies: 1920x1080, 1440x1080 anamorphic
+  // HD, and 720x480 SD on CS. WebRTC hands the browser the coded size with no aspect
+  // information, so the picture is always stretched back to 16:9 rather than trusting
+  // a per-channel pixel count that never means 1:1 pixels.
+  const displayAspect = 16 / 9
 
   // Inscribe the picture frame in the stage so the video always touches two viewport
-  // edges. The frame follows the broadcast aspect, so the picture is never boxed twice.
+  // edges, and keep it identical on every channel.
   function updateFrameSize() {
     cancelAnimationFrame(frameAnimationFrame)
     frameAnimationFrame = requestAnimationFrame(() => {
@@ -281,17 +313,14 @@
     })
   }
 
-  // restart-encoding reuses the media track, so loadeddata never fires again on a
-  // channel change, and a renegotiation can leave the element reporting a size we
-  // never got an event for. Reconcile from the element instead of trusting events.
-  function syncIntrinsicSize() {
+  function logIntrinsicSize() {
     if (!videoElement) return
     const width = videoElement.videoWidth || 0
     const height = videoElement.videoHeight || 0
     if (width === videoWidth && height === videoHeight) return
     videoWidth = width
     videoHeight = height
-    addLog(`Video size: ${width}x${height}`)
+    addLog(`Video size: ${width}x${height} (displayed as 16:9)`)
   }
 
   function updateVolume(event: Event) {
@@ -358,7 +387,6 @@
     orientationController()?.addEventListener?.('change', scheduleViewportSettle)
     updateFrameSize()
     revealControls()
-    intrinsicSyncTimer = setInterval(syncIntrinsicSize, 1000)
   })
 
   function clearSubtitles() {
@@ -421,7 +449,7 @@
     addLog(`Audio mode: ${getAudioModeLabel(requestedAudioMode)}`)
     // Restart encoding with new setting if currently streaming
     if (rtcClient && streamStarted) {
-      isStartingStream = true
+      beginStartAttempt()
       const requestId = rtcClient.setAudioMode(requestedAudioMode)
       pendingRestart = {
         requestId,
@@ -501,7 +529,7 @@
     recoveryTimer = setTimeout(() => {
       recoveryTimer = null
       if (destroyed || sequence !== streamSequence || currentChannel !== channel) return
-      isStartingStream = false
+      settleStartAttempt()
       void startStream(channel, true)
     }, delay)
   }
@@ -516,7 +544,7 @@
       addLog('Stream already starting, forcing restart for new channel')
     }
 
-    isStartingStream = true
+    beginStartAttempt()
     const startTime = Date.now()
     tracksReceived = 0
 
@@ -613,7 +641,8 @@
           }
 
           streamStarted = true
-          isStartingStream = false
+          startWatchdogReleases = 0
+          settleStartAttempt()
           markRecoveryStable(thisStreamSequence)
         },
         onConnectionStateChange: (state) => {
@@ -625,7 +654,7 @@
             addLog('WebRTC connected - low latency streaming active', 'success')
           } else if (state === 'failed') {
             addLog('WebRTC connection failed', 'error')
-            isStartingStream = false
+            settleStartAttempt()
           }
           scheduleRecovery(currentChannel, thisStreamSequence, state)
         },
@@ -638,7 +667,7 @@
             audioMode = pendingRestart.previousAudioMode
             pendingRestart = null
           }
-          isStartingStream = false
+          settleStartAttempt()
         },
         onEncodingRestarted: (newChannelId, requestId) => {
           if (thisStreamSequence !== streamSequence || destroyed) return
@@ -649,8 +678,7 @@
             pendingRestart = null
           }
           addLog(`Encoding restarted for channel ${newChannelId}`, 'success')
-          isStartingStream = false
-          syncIntrinsicSize()
+          settleStartAttempt()
           schedulePipelineLogs(newChannelId)
         },
         onSubtitle: handleSubtitle,
@@ -667,7 +695,7 @@
 
     } catch (error) {
       addLog(`Failed to start WebRTC stream: ${error}`, 'error')
-      isStartingStream = false
+      settleStartAttempt()
     }
   }
 
@@ -708,7 +736,7 @@
     orientationLockCoordinator?.destroy()
     orientationLockCoordinator = null
     clearSubtitles()
-    if (intrinsicSyncTimer) clearInterval(intrinsicSyncTimer)
+    clearStartWatchdog()
     if (pipelineLogTimer) clearTimeout(pipelineLogTimer)
     if (rtcClient) {
       rtcClient.disconnect()
@@ -756,19 +784,19 @@
         <!-- svelte-ignore a11y-media-has-caption -->
         <video
           bind:this={videoElement}
-          style:object-fit={anamorphic ? 'fill' : 'contain'}
+          style:object-fit="fill"
           autoplay
           playsinline
           muted={!audioEnabled}
           on:volumechange={syncMediaVolume}
-          on:resize={syncIntrinsicSize}
-          on:loadedmetadata={syncIntrinsicSize}
+          on:resize={logIntrinsicSize}
+          on:loadedmetadata={logIntrinsicSize}
           use:nativeFullscreenEvents
           on:play={() => {
             addLog(`Video play event, paused=${videoElement?.paused}, currentTime=${videoElement?.currentTime}`)
           }}
           on:playing={() => {
-            syncIntrinsicSize()
+            logIntrinsicSize()
             addLog(`Video playing event`)
           }}
           on:waiting={() => {
@@ -782,7 +810,7 @@
             addLog(`Video error: ${err?.code} ${err?.message}`, 'error')
           }}
           on:loadeddata={() => {
-            syncIntrinsicSize()
+            logIntrinsicSize()
             addLog(`Video loadeddata, videoWidth=${videoWidth}, videoHeight=${videoHeight}`)
           }}
         >

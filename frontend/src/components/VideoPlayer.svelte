@@ -63,7 +63,7 @@
   let barHovered = false
   const viewportSettleTimers = new Set<ReturnType<typeof setTimeout>>()
   let orientationLockCoordinator: ReturnType<typeof createOrientationLockCoordinator> | null = null
-  let playerGesture: { pointerId: number, startedOutsideToolbar: boolean } | null = null
+  let playerGesture: { pointerId: number } | null = null
   let pendingRestart: {
     requestId: string
     previousChannel: any
@@ -147,10 +147,10 @@
 
   function handlePlayerPointerDown(event: PointerEvent) {
     if (!event.isPrimary || playerGesture) return
-    playerGesture = {
-      pointerId: event.pointerId,
-      startedOutsideToolbar: !eventIsInsideToolbar(event),
-    }
+    // Never capture a gesture that starts on the bar: capturing retargets the
+    // follow-up click to the shell and the bar buttons would stop responding.
+    if (eventIsInsideToolbar(event)) return
+    playerGesture = { pointerId: event.pointerId }
     try {
       playerShell.setPointerCapture(event.pointerId)
     } catch {
@@ -163,9 +163,9 @@
     const endElement = document.elementFromPoint(event.clientX, event.clientY)
     const endedInsidePlayer = endElement instanceof Element && playerShell.contains(endElement)
     const endedInsideToolbar = endElement instanceof Element && Boolean(endElement.closest('.player-bar'))
-    const shouldHandle = playerGesture.startedOutsideToolbar && endedInsidePlayer && !endedInsideToolbar
     cancelPlayerGesture(event)
-    if (!shouldHandle) return
+    // Both press and release must happen on the picture, never on the bar.
+    if (!endedInsidePlayer || endedInsideToolbar) return
     enableAudioFromUserGesture()
     toggleControls()
   }

@@ -6,6 +6,7 @@
   import { createOrientationLockCoordinator, requestViewerFullscreen, type OrientationController } from '../lib/fullscreen'
   import { fittedFullscreenVideoSize } from '../lib/viewportFit'
   import { normalizedVolume } from '../lib/audioVolume'
+  import { broadcastDisplayAspect, displayAspectRatio, type VideoFormatMessage } from '../lib/videoFormat'
   import TunerStatus from './TunerStatus.svelte'
 
   const dispatch = createEventDispatcher()
@@ -294,12 +295,18 @@
     }
   }
 
-  // Every channel is broadcast for a 16:9 display and the encoder tags its output as
-  // 16:9 (nvenc_native.go), but the coded size varies: 1920x1080, 1440x1080 anamorphic
-  // HD, and 720x480 SD on CS. WebRTC hands the browser the coded size with no aspect
-  // information, so the picture is always stretched back to 16:9 rather than trusting
-  // a per-channel pixel count that never means 1:1 pixels.
-  const displayAspect = 16 / 9
+  // The server parses the MPEG-2 sequence header and announces the display aspect,
+  // because the coded size the browser reports never means square pixels: 1440x1080
+  // and 720x480 are both 16:9 broadcasts. 16:9 stands in until the first announcement.
+  let displayAspect = broadcastDisplayAspect
+
+  function applyVideoFormat(format: VideoFormatMessage) {
+    const aspect = displayAspectRatio(format)
+    if (aspect === displayAspect) return
+    displayAspect = aspect
+    addLog(`Source ${format.width}x${format.height} displayed at ${format.aspectNum}:${format.aspectDen}`)
+    updateFrameSize()
+  }
 
   // Inscribe the picture frame in the stage so the video always touches two viewport
   // edges, and keep it identical on every channel.
@@ -682,6 +689,7 @@
           schedulePipelineLogs(newChannelId)
         },
         onSubtitle: handleSubtitle,
+        onVideoFormat: applyVideoFormat,
         onLog: (message) => {
           debugLogs = [message, ...debugLogs.slice(0, 99999)]
         }

@@ -1,6 +1,8 @@
 // Audio mode for dual mono streams (Japanese bilingual broadcasts)
 export type AudioMode = 'main' | 'sub' | 'both';
 
+import type { VideoFormatMessage } from '../videoFormat';
+
 // WebRTC signaling message types
 export interface SignalingMessage {
   type: 'offer' | 'answer' | 'ice-candidate' | 'stream-start' | 'stream-stop' | 'stream-stopped' | 'restart-encoding' | 'encoding-restarted' | 'error' | 'ready' | 'ping' | 'pong';
@@ -25,6 +27,9 @@ export interface SubtitleMessage {
   style?: string;
 }
 
+// Video geometry announced by the server, parsed from the MPEG-2 sequence header
+export type { VideoFormatMessage } from '../videoFormat';
+
 // Connection status
 export type ConnectionStatus =
   | 'disconnected'
@@ -41,6 +46,7 @@ export interface RTCClientOptions {
   onTrack?: (track: MediaStreamTrack, stream: MediaStream) => void;
   onConnectionStateChange?: (state: ConnectionStatus) => void;
   onSubtitle?: (subtitle: SubtitleMessage) => void;
+  onVideoFormat?: (format: VideoFormatMessage) => void; // Broadcast picture geometry (aspect ratio)
   onEncodingRestarted?: (channelId: string, requestId?: string) => void; // Called when encoding is restarted (e.g., subtitle toggle, channel change)
   onError?: (error: Error, requestId?: string) => void;
   onLog?: (message: string) => void;

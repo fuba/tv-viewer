@@ -1,4 +1,4 @@
-import type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode } from './types';
+import type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode, VideoFormatMessage } from './types';
 
 export class RTCClient {
   private pc: RTCPeerConnection | null = null;
@@ -15,6 +15,7 @@ export class RTCClient {
   private onTrack?: (track: MediaStreamTrack, stream: MediaStream) => void;
   private onConnectionStateChange?: (state: ConnectionStatus) => void;
   private onSubtitle?: (subtitle: SubtitleMessage) => void;
+  private onVideoFormat?: (format: VideoFormatMessage) => void;
   private onEncodingRestarted?: (channelId: string, requestId?: string) => void;
   private onError?: (error: Error, requestId?: string) => void;
   private onLog?: (message: string) => void;
@@ -29,6 +30,7 @@ export class RTCClient {
     this.onTrack = options.onTrack;
     this.onConnectionStateChange = options.onConnectionStateChange;
     this.onSubtitle = options.onSubtitle;
+    this.onVideoFormat = options.onVideoFormat;
     this.onEncodingRestarted = options.onEncodingRestarted;
     this.onError = options.onError;
     this.onLog = options.onLog;
@@ -198,10 +200,15 @@ export class RTCClient {
           } else {
             dataStr = msgEvent.data;
           }
-          const subtitle = JSON.parse(dataStr) as SubtitleMessage;
-          this.onSubtitle?.(subtitle);
+          // The data channel carries captions and picture geometry.
+          const message = JSON.parse(dataStr) as { type?: string };
+          if (message?.type === 'video-format') {
+            this.onVideoFormat?.(message as VideoFormatMessage);
+            return;
+          }
+          this.onSubtitle?.(message as SubtitleMessage);
         } catch (e) {
-          this.log(`Failed to parse subtitle: ${e}`);
+          this.log(`Failed to parse data channel message: ${e}`);
         }
       };
     };
@@ -453,4 +460,4 @@ export class RTCClient {
   }
 }
 
-export type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode };
+export type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode, VideoFormatMessage };

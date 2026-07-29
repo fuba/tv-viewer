@@ -69,6 +69,9 @@ func runNativePipeline(ctx context.Context, channelID string, input io.Reader, v
 	defer func() { _ = audioDecoder.Close() }()
 	var videoEncoder *nativevideo.NVEncoder
 	var encoderWidth, encoderHeight, encoderFPS int
+	var encoderAspect nativevideo.DisplayAspect
+	var sourceAspect nativevideo.DisplayAspect
+	var videoFormat videoFormatAnnouncer
 	var opusEncoder *nativeaudio.Encoder
 	var pcm []int16
 	var pcmChannels int
@@ -121,6 +124,20 @@ func runNativePipeline(ctx context.Context, channelID string, input io.Reader, v
 			}
 			for _, frame := range frames {
 				metrics.sourceFrames++
+				// The sequence header is the only place the broadcast states how the
+				// coded picture must be shaped, so read it before decoding the frame.
+				if format, ok := mpegts.ParseVideoFormat(frame.Data); ok {
+					if videoFormat.changed(format) {
+						log.Printf("[Native] Source video format %dx%d displayed at %d:%d",
+							format.Width, format.Height, format.AspectNum, format.AspectDen)
+					}
+					if videoFormat.shouldAnnounce(format, time.Now()) && subtitleOut != nil {
+						if err := writeDataChannelJSON(subtitleOut, videoFormatMessage(format)); err != nil {
+							return err
+						}
+					}
+					sourceAspect = nativevideo.DisplayAspect{Num: format.AspectNum, Den: format.AspectDen}
+				}
 				timeline.Add(frame.PTS, frame.HasPTS)
 				frameDuration := broadcastFrameDuration
 				decodeStarted := time.Now()
@@ -146,17 +163,19 @@ func runNativePipeline(ctx context.Context, channelID string, input io.Reader, v
 						outputPTS += uint64(gpuFrame.FieldIndex) * broadcastPictureTicks / 2
 					}
 					if videoEncoder == nil || encoderWidth != gpuFrame.Width ||
-						encoderHeight != gpuFrame.Height || encoderFPS != encodeFPS {
+						encoderHeight != gpuFrame.Height || encoderFPS != encodeFPS ||
+						encoderAspect != sourceAspect {
 						if videoEncoder != nil {
 							if closeErr := videoEncoder.Close(); closeErr != nil {
 								return closeErr
 							}
 						}
-						videoEncoder, err = nativevideo.NewNVEncoderForAdaptiveDecoder(gpuFrame.Width, gpuFrame.Height, encodeFPS, nativeVideoBitrate, decoder)
+						videoEncoder, err = nativevideo.NewNVEncoderForAdaptiveDecoder(gpuFrame.Width, gpuFrame.Height, encodeFPS, nativeVideoBitrate, sourceAspect, decoder)
 						if err != nil {
 							return err
 						}
 						encoderWidth, encoderHeight, encoderFPS = gpuFrame.Width, gpuFrame.Height, encodeFPS
+						encoderAspect = sourceAspect
 					}
 					encodeStarted := time.Now()
 					encoded, err := videoEncoder.EncodeSurface(gpuFrame)
@@ -301,13 +320,13 @@ func runNativePipeline(ctx context.Context, channelID string, input io.Reader, v
 				log.Printf("[Native] Selected ARIB caption PID %#x", selectedCaptionPID)
 			}
 			if caption.Text == "" {
-				return writeSubtitleJSON(subtitleOut, map[string]any{"type": "clear"})
+				return writeDataChannelJSON(subtitleOut, map[string]any{"type": "clear"})
 			}
 			duration := caption.Duration
 			if duration <= 0 || duration > 10*time.Second {
 				duration = 5 * time.Second
 			}
-			return writeSubtitleJSON(subtitleOut, map[string]any{
+			return writeDataChannelJSON(subtitleOut, map[string]any{
 				"type": "show", "id": "arib-caption",
 				"text": caption.Text, "endTime": duration.Seconds(),
 			})
@@ -317,7 +336,9 @@ func runNativePipeline(ctx context.Context, channelID string, input io.Reader, v
 	return err
 }
 
-func writeSubtitleJSON(output io.Writer, message any) error {
+// writeDataChannelJSON sends one JSON message to every viewer of this session
+// over the peer data channel that also carries captions.
+func writeDataChannelJSON(output io.Writer, message any) error {
 	data, err := json.Marshal(message)
 	if err != nil {
 		return err

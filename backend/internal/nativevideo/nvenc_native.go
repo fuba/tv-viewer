@@ -45,7 +45,7 @@ static int tv_nvenc_load_driver(void) {
 	int stage;
 } tv_nvenc;
 
-static int tv_nvenc_init(tv_nvenc **result, unsigned int width, unsigned int height, unsigned int fps, unsigned int bitrate, uintptr_t shared_context) {
+static int tv_nvenc_init(tv_nvenc **result, unsigned int width, unsigned int height, unsigned int fps, unsigned int bitrate, unsigned int dar_width, unsigned int dar_height, uintptr_t shared_context) {
 	tv_nvenc *state = calloc(1, sizeof(*state));
 	NVENCSTATUS status;
 	NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS open_params = {0};
@@ -93,9 +93,10 @@ static int tv_nvenc_init(tv_nvenc **result, unsigned int width, unsigned int hei
 	init_params.presetGUID = NV_ENC_PRESET_P4_GUID;
 	init_params.encodeWidth = width;
 	init_params.encodeHeight = height;
-	// Japanese terrestrial broadcasts use 1440x1080 coded pixels with 16:9 display aspect.
-	init_params.darWidth = 16;
-	init_params.darHeight = 9;
+	// Broadcasts code non-square pixels, so the display aspect comes from the
+	// source sequence header rather than from the coded size.
+	init_params.darWidth = dar_width ? dar_width : width;
+	init_params.darHeight = dar_height ? dar_height : height;
 	init_params.frameRateNum = fps;
 	init_params.frameRateDen = 1;
 	init_params.enablePTD = 1;
@@ -364,18 +365,25 @@ type NVEncoder struct {
 	mu      sync.Mutex
 }
 
+// DisplayAspect is the ratio the coded picture must be displayed at. A zero
+// value means square pixels, where the coded size already is the ratio.
+type DisplayAspect struct {
+	Num int
+	Den int
+}
+
 func NewNVEncoder(width, height, fps, bitrate int) (*NVEncoder, error) {
-	return newNVEncoder(width, height, fps, bitrate, 0)
+	return newNVEncoder(width, height, fps, bitrate, DisplayAspect{}, 0)
 }
 
 // NewNVEncoderForAdaptiveDecoder shares the decoder's CUDA context to avoid
 // expensive cross-context synchronization between NVDEC and NVENC.
-func NewNVEncoderForAdaptiveDecoder(width, height, fps, bitrate int, decoder *AdaptiveDecoder) (*NVEncoder, error) {
+func NewNVEncoderForAdaptiveDecoder(width, height, fps, bitrate int, aspect DisplayAspect, decoder *AdaptiveDecoder) (*NVEncoder, error) {
 	context, ok := decoder.acquireCUDAContext()
 	if !ok {
 		return nil, ErrUnavailable
 	}
-	encoder, err := newNVEncoder(width, height, fps, bitrate, context)
+	encoder, err := newNVEncoder(width, height, fps, bitrate, aspect, context)
 	if err != nil {
 		decoder.releaseCUDAContext()
 		return nil, err
@@ -384,12 +392,16 @@ func NewNVEncoderForAdaptiveDecoder(width, height, fps, bitrate int, decoder *Ad
 	return encoder, nil
 }
 
-func newNVEncoder(width, height, fps, bitrate int, cudaContext uintptr) (*NVEncoder, error) {
+func newNVEncoder(width, height, fps, bitrate int, aspect DisplayAspect, cudaContext uintptr) (*NVEncoder, error) {
 	if width <= 0 || height <= 0 || width > 4096 || height > 2160 || fps <= 0 || fps > 120 || bitrate <= 0 {
 		return nil, fmt.Errorf("invalid NVENC configuration: %dx%d fps=%d bitrate=%d", width, height, fps, bitrate)
 	}
+	if aspect.Num < 0 || aspect.Den < 0 || (aspect.Num == 0) != (aspect.Den == 0) {
+		return nil, fmt.Errorf("invalid NVENC display aspect %d:%d", aspect.Num, aspect.Den)
+	}
 	var handle *C.tv_nvenc
-	status := C.tv_nvenc_init(&handle, C.uint(width), C.uint(height), C.uint(fps), C.uint(bitrate), C.uintptr_t(cudaContext))
+	status := C.tv_nvenc_init(&handle, C.uint(width), C.uint(height), C.uint(fps), C.uint(bitrate),
+		C.uint(aspect.Num), C.uint(aspect.Den), C.uintptr_t(cudaContext))
 	if status != 0 {
 		return nil, fmt.Errorf("NVENC initialization failed: status=%d", int(status))
 	}

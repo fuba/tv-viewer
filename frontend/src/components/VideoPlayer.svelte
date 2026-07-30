@@ -8,6 +8,7 @@
   import { normalizedVolume } from '../lib/audioVolume'
   import { broadcastDisplayAspect, displayAspectRatio, type VideoFormatMessage } from '../lib/videoFormat'
   import TunerStatus from './TunerStatus.svelte'
+  import SubtitleRenderer from './SubtitleRenderer.svelte'
 
   const dispatch = createEventDispatcher()
 
@@ -48,8 +49,8 @@
   // 'both' = stereo, 'main' = left channel, 'sub' = right channel
   let audioMode: AudioMode = 'both'
 
-  let activeSubtitles: Record<string, string> = {}
-  let subtitleText = ''
+  let activeSubtitles: Record<string, SubtitleMessage> = {}
+  let activeCaptions: SubtitleMessage[] = []
   const subtitleTimers = new Map<string, ReturnType<typeof setTimeout>>()
   let pipelineLogTimer: ReturnType<typeof setTimeout> | null = null
   let startWatchdogTimer: ReturnType<typeof setTimeout> | null = null
@@ -400,11 +401,11 @@
     subtitleTimers.forEach(timer => clearTimeout(timer))
     subtitleTimers.clear()
     activeSubtitles = {}
-    subtitleText = ''
+    activeCaptions = []
   }
 
   function updateSubtitleText() {
-    subtitleText = Object.values(activeSubtitles).join('\n')
+    activeCaptions = Object.values(activeSubtitles)
   }
 
   function handleSubtitle(message: SubtitleMessage) {
@@ -423,7 +424,7 @@
       return
     }
     if (message.type === 'show' && message.text) {
-      activeSubtitles[id] = message.text
+      activeSubtitles[id] = message
       activeSubtitles = { ...activeSubtitles }
       updateSubtitleText()
       const previous = subtitleTimers.get(id)
@@ -824,12 +825,8 @@
         >
         </video>
 
-        {#if burnInSubtitles && subtitleText}
-          <div class="live-subtitle-layer" aria-live="polite">
-            <div class="live-subtitle-body">
-              {subtitleText}
-            </div>
-          </div>
+        {#if burnInSubtitles && activeCaptions.length}
+          <SubtitleRenderer captions={activeCaptions} />
         {/if}
 
         {#if isStartingStream}

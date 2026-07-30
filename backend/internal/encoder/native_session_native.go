@@ -326,10 +326,7 @@ func runNativePipeline(ctx context.Context, channelID string, input io.Reader, v
 			if duration <= 0 || duration > 10*time.Second {
 				duration = 5 * time.Second
 			}
-			return writeDataChannelJSON(subtitleOut, map[string]any{
-				"type": "show", "id": "arib-caption",
-				"text": caption.Text, "endTime": duration.Seconds(),
-			})
+			return writeDataChannelJSON(subtitleOut, captionMessage(caption, duration))
 		}
 		return nil
 	})

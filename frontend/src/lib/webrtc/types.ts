@@ -17,6 +17,28 @@ export interface SignalingMessage {
   audioMode?: AudioMode;     // Dual mono mode: 'main' (left), 'sub' (right), 'both' (stereo)
 }
 
+// One run of characters as ARIB placed it on the caption plane
+export interface CaptionSpan {
+  text: string;
+  left: number;
+  advance: number;    // distance to the next run, so a row paints as one box
+  chars?: number;     // characters in the run: advance/chars is the drawn cell
+  fontWidth: number;
+  fontHeight: number;
+  charSpace: number;
+  color?: string;
+  background?: string;
+  opacity?: number;
+  backgroundOpacity?: number;
+}
+
+// One drawn caption line. A row of small runs above another row is ruby.
+export interface CaptionRow {
+  text: string;
+  bottom: number;
+  spans: CaptionSpan[];
+}
+
 // Subtitle message from DataChannel
 export interface SubtitleMessage {
   type: 'show' | 'hide' | 'clear';
@@ -25,6 +47,8 @@ export interface SubtitleMessage {
   startTime?: number;
   endTime?: number;
   style?: string;
+  plane?: { width: number; height: number }; // ARIB caption plane, e.g. 960x540
+  rows?: CaptionRow[];
 }
 
 // Video geometry announced by the server, parsed from the MPEG-2 sequence header

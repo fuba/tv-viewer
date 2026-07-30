@@ -2,15 +2,7 @@
 
 package nativecaption
 
-import (
-	"errors"
-	"time"
-)
-
-type Caption struct {
-	Text     string
-	Duration time.Duration
-}
+import "errors"
 
 type Decoder struct{}
 

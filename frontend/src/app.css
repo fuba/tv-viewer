@@ -179,12 +179,18 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 .live-subtitle-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
 
 .live-subtitle-body {
+  /* Centring with left:50% would cap the line at half the picture, because an
+     absolutely positioned box may only grow from its left edge to the container
+     edge. Anchoring both sides and centring the shrink-to-fit box keeps the full
+     width available for the caption. */
   position: absolute;
-  left: 50%;
+  right: 0;
   bottom: 5%;
-  transform: translateX(-50%);
+  left: 0;
   box-sizing: border-box;
-  max-width: 80%;
+  width: fit-content;
+  max-width: 92%;
+  margin-inline: auto;
   padding: 0.22em 0.42em;
   background: rgb(0 0 0 / 80%);
   color: white;
@@ -199,6 +205,10 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
      0.06em -0.06em 0 #000,
     -0.06em  0.06em 0 #000,
      0.06em  0.06em 0 #000;
+  /* Japanese line breaking: keep kinsoku rules, and balance the rare caption
+     that still needs two lines instead of leaving one stray word. */
+  line-break: strict;
+  text-wrap: balance;
   white-space: pre-line;
   overflow-wrap: break-word;
 }

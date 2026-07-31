@@ -1,7 +1,13 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
 
-import { captionSpanStyle, hasPlacedLayout, horizontalScale } from './captionLayout.ts'
+import {
+  captionBackgroundOpacity,
+  captionBands,
+  captionSpanStyle,
+  hasPlacedLayout,
+  horizontalScale,
+} from './captionLayout.ts'
 import type { CaptionRow, CaptionSpan } from './webrtc/types.ts'
 
 // Captured from a live NHK Eテレ broadcast: "（筒井）うん！" drawn on the lower
@@ -65,22 +71,47 @@ test('ruby is placed above its base text', () => {
   assert.equal(rubyStyle.left, baseStyle.left)
 })
 
-test('colours fall back to the usual white on black', () => {
+test('colours fall back to the usual white text', () => {
   const style = captionSpanStyle(bracket, row, plane)
   assert.equal(style.color, '#ffffff')
-  assert.equal(style.background, '#000000')
   assert.equal(style.opacity, 1)
-  assert.equal(style.backgroundOpacity, 1)
 
-  const coloured = captionSpanStyle(
-    { ...bracket, color: '#00a0ff', background: '#202020', opacity: 0.5, backgroundOpacity: 0 },
-    row,
+  const coloured = captionSpanStyle({ ...bracket, color: '#00a0ff', opacity: 0.5 }, row, plane)
+  assert.equal(coloured.color, '#00a0ff')
+  assert.equal(coloured.opacity, 0.5)
+})
+
+test('touching runs paint as one band, so a translucent background has no seams', () => {
+  const bands = captionBands({ ...row, spans: [bracket, name] }, plane)
+  assert.equal(bands.length, 1)
+  assert.equal(bands[0].left, (658 / 960) * 100)
+  assert.equal(bands[0].width, ((20 + 80) / 960) * 100)
+  assert.equal(bands[0].height, (60 / 540) * 100)
+})
+
+test('a gap the broadcaster left keeps the picture visible', () => {
+  const detached: CaptionSpan = { ...name, left: 758, width: 80 }
+  const bands = captionBands({ ...row, spans: [bracket, detached] }, plane)
+  assert.equal(bands.length, 2)
+  assert.equal(bands[1].left, (758 / 960) * 100)
+})
+
+test('the background is translucent but keeps what the broadcast asked for', () => {
+  const bands = captionBands({ ...row, spans: [bracket] }, plane)
+  assert.equal(bands[0].background, '#000000')
+  assert.equal(bands[0].opacity, captionBackgroundOpacity)
+  assert.ok(captionBackgroundOpacity > 0 && captionBackgroundOpacity < 1)
+
+  // A background the broadcaster made transparent must not be painted at all.
+  assert.deepEqual(captionBands({ ...row, spans: [{ ...bracket, backgroundOpacity: 0 }] }, plane), [])
+
+  // A different background colour starts its own band.
+  const coloured = captionBands(
+    { ...row, spans: [bracket, { ...name, background: '#0000ff' }] },
     plane,
   )
-  assert.equal(coloured.color, '#00a0ff')
-  assert.equal(coloured.background, '#202020')
-  assert.equal(coloured.opacity, 0.5)
-  assert.equal(coloured.backgroundOpacity, 0)
+  assert.equal(coloured.length, 2)
+  assert.equal(coloured[1].background, '#0000ff')
 })
 
 test('a caption without geometry falls back to the plain text layout', () => {

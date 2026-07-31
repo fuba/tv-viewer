@@ -1,6 +1,6 @@
 <script lang="ts">
   import type { SubtitleMessage } from '../lib/webrtc/types'
-  import { captionSpanStyle, hasPlacedLayout } from '../lib/captionLayout'
+  import { captionBands, captionSpanStyle, hasPlacedLayout } from '../lib/captionLayout'
 
   // ARIB draws captions on a fixed plane (960x540 for HD) and places every run of
   // characters at an absolute position on it. Drawing them the same way keeps the
@@ -14,13 +14,28 @@
     .map(caption => caption.text ?? '')
     .filter(Boolean)
     .join('\n')
-
 </script>
 
 {#if placed.length}
   <div class="caption-plane" aria-live="polite">
     {#each placed as caption}
       {@const plane = caption.plane ?? { width: 0, height: 0 }}
+      <!-- The background is painted first, as one band per stretch of caption. -->
+      {#each caption.rows ?? [] as row}
+        {#each captionBands(row, plane) as band}
+          <span
+            class="caption-band"
+            style="
+              left: {band.left}%;
+              bottom: {band.bottom}%;
+              width: {band.width}%;
+              height: {band.height}%;
+              background: {band.background};
+              opacity: {band.opacity};
+            "
+          ></span>
+        {/each}
+      {/each}
       {#each caption.rows ?? [] as row}
         {#each row.spans ?? [] as span}
           {@const style = captionSpanStyle(span, row, plane)}
@@ -34,8 +49,6 @@
               font-size: {style.fontSize}cqh;
               color: {style.color};
               opacity: {style.opacity};
-              --caption-background: {style.background};
-              --caption-background-opacity: {style.backgroundOpacity};
             "
           >
             <span
@@ -64,6 +77,11 @@
     font-family: 'WLMaru2004Emoji', 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
   }
 
+  .caption-band {
+    position: absolute;
+    display: block;
+  }
+
   .caption-span {
     position: absolute;
     display: flex;
@@ -71,15 +89,6 @@
     box-sizing: border-box;
     line-height: 1;
     white-space: pre;
-  }
-
-  /* The drawn caption box sits behind the glyphs and keeps its own opacity. */
-  .caption-span::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    background: var(--caption-background, #000);
-    opacity: var(--caption-background-opacity, 1);
   }
 
   .caption-run {

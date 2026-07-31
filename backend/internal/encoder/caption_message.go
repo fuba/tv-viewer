@@ -28,7 +28,8 @@ func captionMessage(caption nativecaption.Caption, duration time.Duration) map[s
 			spans = append(spans, map[string]any{
 				"text":              span.Text,
 				"left":              span.Left,
-				"advance":           span.Advance,
+				"width":             span.Width,
+				"chars":             span.Chars,
 				"fontWidth":         span.FontWidth,
 				"fontHeight":        span.FontHeight,
 				"charSpace":         span.HorizontalSpace,
@@ -41,6 +42,7 @@ func captionMessage(caption nativecaption.Caption, duration time.Duration) map[s
 		rows = append(rows, map[string]any{
 			"text":   row.Text,
 			"bottom": row.Bottom,
+			"height": row.Height,
 			"spans":  spans,
 		})
 	}

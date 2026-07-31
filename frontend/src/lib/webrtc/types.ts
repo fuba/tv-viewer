@@ -20,9 +20,9 @@ export interface SignalingMessage {
 // One run of characters as ARIB placed it on the caption plane
 export interface CaptionSpan {
   text: string;
-  left: number;
-  advance: number;    // distance to the next run, so a row paints as one box
-  chars?: number;     // characters in the run: advance/chars is the drawn cell
+  left: number;       // left edge of the run's character blocks, in plane units
+  width: number;      // the blocks the run occupies, which the background covers
+  chars?: number;
   fontWidth: number;
   fontHeight: number;
   charSpace: number;
@@ -35,7 +35,8 @@ export interface CaptionSpan {
 // One drawn caption line. A row of small runs above another row is ruby.
 export interface CaptionRow {
   text: string;
-  bottom: number;
+  bottom: number;  // lower edge of the character blocks, in plane units
+  height: number;  // full block height, so consecutive rows tile without a seam
   spans: CaptionSpan[];
 }
 

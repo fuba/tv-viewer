@@ -52,8 +52,16 @@ func TestBuildRowsSplitsTheDrawnLines(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want 2", len(rows))
 	}
-	if rows[0].Bottom != 448 || rows[1].Bottom != 508 {
+	// charbottom is the last line of the block, so a row reports the edge below it
+	// and consecutive rows tile: 389..449 and 449..509 for a 60 high block.
+	if rows[0].Bottom != 449 || rows[1].Bottom != 509 {
 		t.Fatalf("rows ordered %d then %d, want the higher line first", rows[0].Bottom, rows[1].Bottom)
+	}
+	if rows[0].Height != 60 || rows[1].Height != 60 {
+		t.Fatalf("row heights = %d, %d, want the full character block of 60", rows[0].Height, rows[1].Height)
+	}
+	if rows[0].Bottom-rows[0].Height != 389 || rows[1].Bottom-rows[1].Height != rows[0].Bottom {
+		t.Fatal("consecutive rows must tile without a seam")
 	}
 	if rows[0].Text != "（筒井）でも　当たりだろ。" {
 		t.Fatalf("first row = %q", rows[0].Text)
@@ -76,17 +84,19 @@ func TestBuildRowsOrdersSpansAndMeasuresAdvance(t *testing.T) {
 			t.Fatalf("spans are not ordered left to right: %+v", spans)
 		}
 	}
-	// The advance lets a client paint one unbroken row background.
-	if spans[0].Advance != 40 || spans[1].Advance != 60 {
-		t.Fatalf("advances = %d, %d, want 40, 60", spans[0].Advance, spans[1].Advance)
+	// The decoder records a region after the cursor has passed its first
+	// character, so a run starts one character block before the reported left.
+	// Corrected, the runs of a row are exactly adjacent.
+	if spans[0].Left != 358 || spans[0].Width != 20 {
+		t.Fatalf("half width run = %d wide at %d, want 20 at 358", spans[0].Width, spans[0].Left)
 	}
-	if spans[len(spans)-1].Advance != 0 {
-		t.Fatalf("the last span must not claim an advance, got %d", spans[len(spans)-1].Advance)
+	if spans[1].Left != 378 || spans[1].Width != 80 {
+		t.Fatalf("normal run = %d wide at %d, want 80 at 378", spans[1].Width, spans[1].Left)
 	}
-	// The advance divided by the characters is the cell the broadcaster drew in,
-	// which is the only reliable way to fit a font into the broadcast layout.
-	if spans[1].Chars != 2 || spans[1].Advance != 60 {
-		t.Fatalf("run metrics = %d chars over %d, want 2 over 60", spans[1].Chars, spans[1].Advance)
+	for i := 1; i < len(spans); i++ {
+		if gap := spans[i].Left - (spans[i-1].Left + spans[i-1].Width); gap < 0 {
+			t.Fatalf("runs overlap by %d: %+v", -gap, spans[i-1:i+1])
+		}
 	}
 	if spans[0].FontWidth != 18 || spans[1].FontWidth != 36 {
 		t.Fatalf("half width and normal runs must keep their own font: %+v", spans[:2])
@@ -120,7 +130,7 @@ func TestBuildRowsKeepsRubyAboveItsBaseText(t *testing.T) {
 	if len(rows) != 2 {
 		t.Fatalf("rows = %d, want the ruby to keep its own line", len(rows))
 	}
-	if rows[0].Bottom != 472 || rows[0].Spans[0].FontHeight != 18 {
+	if rows[0].Bottom != 473 || rows[0].Spans[0].FontHeight != 18 {
 		t.Fatalf("the small run must come first, got %+v", rows[0])
 	}
 	if rows[1].Spans[0].Text != "漢字" {
@@ -128,15 +138,52 @@ func TestBuildRowsKeepsRubyAboveItsBaseText(t *testing.T) {
 	}
 }
 
-func TestBuildRowsIgnoresBlankRegions(t *testing.T) {
+func TestBuildRowsNeverOverlapsRuns(t *testing.T) {
+	// Captured live: an arrow after a full stop, where the decoder reports a
+	// position that would put the arrow inside the preceding run.
 	regions := []Region{
-		{Text: "  ", Left: 100, Bottom: 508, FontWidth: 36, FontHeight: 36, PlaneWidth: 960, PlaneHeight: 540},
-		{Text: "本文", Start: 2, End: 2 + len("本文"), Left: 140, Bottom: 508,
-			FontWidth: 36, FontHeight: 36, PlaneWidth: 960, PlaneHeight: 540},
+		{Text: "それだけじゃない。", Start: 0, End: len("それだけじゃない。"), Left: 458, Bottom: 508,
+			FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, VerticalSpace: 24,
+			PlaneWidth: 960, PlaneHeight: 540},
+		{Text: "→", Start: len("それだけじゃない。"), End: len("それだけじゃない。→"), Left: 778, Bottom: 508,
+			FontWidth: 18, FontHeight: 36, HorizontalSpace: 2, VerticalSpace: 24,
+			PlaneWidth: 960, PlaneHeight: 540},
 	}
-	rows := BuildRows("  本文", regions)
-	if len(rows) != 1 || len(rows[0].Spans) != 1 || rows[0].Text != "本文" {
-		t.Fatalf("blank regions must not create spans: %+v", rows)
+	spans := BuildRows("それだけじゃない。→", regions)[0].Spans
+	if spans[0].Left != 418 || spans[0].Width != 360 {
+		t.Fatalf("run = %d wide at %d, want 360 at 418", spans[0].Width, spans[0].Left)
+	}
+	if spans[1].Left != 778 {
+		t.Fatalf("the arrow starts at %d, want it snapped to 778 where the run ends", spans[1].Left)
+	}
+}
+
+func TestBuildRowsKeepsDrawnSpaces(t *testing.T) {
+	// A space a broadcaster draws carries the caption background, so dropping it
+	// would tear the black band the caption is written on.
+	regions := []Region{
+		{Text: "本文", Start: 0, End: len("本文"), Left: 140, Bottom: 508,
+			FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, PlaneWidth: 960, PlaneHeight: 540},
+		{Text: "　", Start: len("本文"), End: len("本文　"), Left: 220, Bottom: 508,
+			FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, PlaneWidth: 960, PlaneHeight: 540},
+	}
+	rows := BuildRows("本文　", regions)
+	if len(rows) != 1 || len(rows[0].Spans) != 2 {
+		t.Fatalf("a drawn space must keep its cell: %+v", rows)
+	}
+	first, second := rows[0].Spans[0], rows[0].Spans[1]
+	if first.Left+first.Width != second.Left {
+		t.Fatalf("the space must continue the band: %+v", rows[0].Spans)
+	}
+}
+
+func TestBuildRowsIgnoresEmptyRegions(t *testing.T) {
+	regions := []Region{
+		{Text: "", Left: 100, Bottom: 508, FontWidth: 36, FontHeight: 36, PlaneWidth: 960, PlaneHeight: 540},
+		{Text: "本文", Left: 140, Bottom: 508, FontWidth: 36, FontHeight: 36, PlaneWidth: 960, PlaneHeight: 540},
+	}
+	if rows := BuildRows("本文", regions); len(rows) != 1 || len(rows[0].Spans) != 1 {
+		t.Fatalf("an empty region must not create a span: %+v", rows)
 	}
 }
 

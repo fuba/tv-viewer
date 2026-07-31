@@ -7,38 +7,46 @@ import type { CaptionRow, CaptionSpan } from './webrtc/types.ts'
 // Captured from a live NHK Eテレ broadcast: "（筒井）うん！" drawn on the lower
 // row of a 960x540 plane, opening bracket in the half width character size.
 const plane = { width: 960, height: 540 }
-const row: CaptionRow = { text: '（筒井）うん！', bottom: 508, spans: [] }
+// Rows report the lower edge of their character blocks and the full block
+// height, so a two row caption paints as one black band.
+const row: CaptionRow = { text: '（筒井）うん！', bottom: 509, height: 60, spans: [] }
 const bracket: CaptionSpan = {
-  text: '（', left: 678, advance: 40, fontWidth: 18, fontHeight: 36, charSpace: 2,
+  text: '（', left: 658, width: 20, chars: 1, fontWidth: 18, fontHeight: 36, charSpace: 2,
 }
 const name: CaptionSpan = {
-  text: '筒井', left: 718, advance: 60, fontWidth: 36, fontHeight: 36, charSpace: 4,
+  text: '筒井', left: 678, width: 80, chars: 2, fontWidth: 36, fontHeight: 36, charSpace: 4,
 }
 
 test('a span keeps the position the broadcaster drew it at', () => {
   const style = captionSpanStyle(name, row, plane)
-  assert.equal(style.left, (718 / 960) * 100)
-  // 508 of 540 down the plane leaves the row just above the bottom edge.
-  assert.equal(style.bottom, ((540 - 508) / 540) * 100)
+  assert.equal(style.left, (678 / 960) * 100)
+  // 509 of 540 down the plane leaves the row just above the bottom edge.
+  assert.equal(style.bottom, ((540 - 509) / 540) * 100)
   assert.equal(style.fontSize, (36 / 540) * 100)
 })
 
-test('the advance paints a row as one unbroken box', () => {
-  assert.equal(captionSpanStyle(bracket, row, plane).minWidth, (40 / 960) * 100)
-  // The last span of a row claims no advance and is only as wide as its text.
-  assert.equal(captionSpanStyle({ ...name, advance: 0 }, row, plane).minWidth, 0)
+test('the drawn box covers whole character blocks', () => {
+  const style = captionSpanStyle(name, row, plane)
+  // Two normal blocks wide, and a full block high - glyph plus line spacing.
+  assert.equal(style.width, (80 / 960) * 100)
+  assert.equal(style.height, (60 / 540) * 100)
+  // That margin is what makes the glyphs sit inside the box instead of filling it.
+  assert.ok(style.height > style.fontSize)
 })
 
-test('runs are scaled to the cells the broadcast drew them in', () => {
-  // Two normal characters advanced by 60 must not render 80 wide and collide.
-  assert.equal(horizontalScale({ ...name, advance: 60, chars: 2 }), 30 / 40)
-  // A run followed by a gap keeps its natural size instead of stretching.
-  assert.equal(horizontalScale({ ...name, advance: 100, chars: 2 }), 1)
-  // The last run of a row has no advance and falls back to its own cell.
-  assert.equal(horizontalScale({ ...bracket, advance: 0 }), 20 / 38)
-  assert.equal(horizontalScale({ ...name, advance: 0 }), 1)
+test('adjacent runs tile without overlapping', () => {
+  const first = captionSpanStyle(bracket, row, plane)
+  const second = captionSpanStyle(name, row, plane)
+  assert.equal(first.left + first.width, second.left)
+})
+
+test('only half width runs are squeezed', () => {
+  // A half width run draws a narrow glyph in a narrow cell.
+  assert.equal(horizontalScale(bracket), 0.5)
+  // A normal run fills its own cell and must not be distorted.
+  assert.equal(horizontalScale(name), 1)
   // Ruby is small in both directions, so it is not squeezed either.
-  assert.equal(horizontalScale({ ...name, fontWidth: 18, fontHeight: 18, charSpace: 2, advance: 0 }), 1)
+  assert.equal(horizontalScale({ ...name, fontWidth: 18, fontHeight: 18, charSpace: 2 }), 1)
 })
 
 test('character spacing scales with the character size', () => {
@@ -47,10 +55,10 @@ test('character spacing scales with the character size', () => {
 })
 
 test('ruby is placed above its base text', () => {
-  const base: CaptionSpan = { text: '漢字', left: 200, advance: 0, fontWidth: 36, fontHeight: 36, charSpace: 4 }
-  const ruby: CaptionSpan = { text: 'かんじ', left: 200, advance: 0, fontWidth: 18, fontHeight: 18, charSpace: 2 }
-  const baseStyle = captionSpanStyle(base, { text: '漢字', bottom: 508, spans: [] }, plane)
-  const rubyStyle = captionSpanStyle(ruby, { text: 'かんじ', bottom: 472, spans: [] }, plane)
+  const base: CaptionSpan = { text: '漢字', left: 200, width: 80, fontWidth: 36, fontHeight: 36, charSpace: 4 }
+  const ruby: CaptionSpan = { text: 'かんじ', left: 200, width: 60, fontWidth: 18, fontHeight: 18, charSpace: 2 }
+  const baseStyle = captionSpanStyle(base, { text: '漢字', bottom: 509, height: 60, spans: [] }, plane)
+  const rubyStyle = captionSpanStyle(ruby, { text: 'かんじ', bottom: 473, height: 30, spans: [] }, plane)
 
   assert.ok(rubyStyle.bottom > baseStyle.bottom, 'ruby must sit higher than its base text')
   assert.ok(rubyStyle.fontSize < baseStyle.fontSize, 'ruby must be drawn smaller')

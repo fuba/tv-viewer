@@ -32,12 +32,14 @@ type Region struct {
 	BackgroundAlpha int
 }
 
-// Span is one run of characters within a row.
+// Span is one run of characters within a row, in plane coordinates. Left and
+// Width bound the character blocks the run occupies, which is what the drawn
+// background covers - the glyphs themselves are inset by the character spacing.
 type Span struct {
 	Text            string
 	Left            int
-	Advance         int // distance to the next span, so a row can be painted without gaps
-	Chars           int // characters in the run, which turns Advance into a per character cell
+	Width           int
+	Chars           int
 	FontWidth       int
 	FontHeight      int
 	HorizontalSpace int
@@ -47,10 +49,13 @@ type Span struct {
 	BackgroundAlpha int
 }
 
-// Row is one caption line: every span the broadcaster drew at the same height.
+// Row is one caption line. Bottom is the lower edge of its character blocks and
+// Height their full height, so consecutive rows tile without a seam, the way a
+// caption is drawn on television.
 type Row struct {
 	Text   string
 	Bottom int
+	Height int
 	Spans  []Span
 }
 
@@ -74,7 +79,7 @@ func BuildRows(decoded string, regions []Region) []Row {
 	grouped := make(map[int][]Region)
 	order := make([]int, 0, len(regions))
 	for _, region := range regions {
-		if strings.TrimSpace(region.Text) == "" {
+		if region.Text == "" {
 			continue
 		}
 		if _, seen := grouped[region.Bottom]; !seen {
@@ -88,17 +93,31 @@ func BuildRows(decoded string, regions []Region) []Row {
 	for _, bottom := range order {
 		members := grouped[bottom]
 		sort.SliceStable(members, func(i, j int) bool { return members[i].Left < members[j].Left })
-		row := Row{Bottom: bottom, Spans: make([]Span, 0, len(members))}
+		// charbottom is the last line of the block, so the block edge is one below.
+		row := Row{Bottom: bottom + 1, Spans: make([]Span, 0, len(members))}
+		rightEdge := 0
 		for i, region := range members {
-			advance := 0
-			if i+1 < len(members) {
-				advance = members[i+1].Left - region.Left
+			chars := utf8.RuneCountInString(region.Text)
+			cellWidth := region.FontWidth + region.HorizontalSpace
+			cellHeight := region.FontHeight + region.VerticalSpace
+			if cellHeight > row.Height {
+				row.Height = cellHeight
 			}
+			// The decoder advances the cursor past the first character before it
+			// records the region, so a run starts one character block earlier -
+			// except after the punctuation it treats specially (、。→), where the
+			// correction overshoots. Cells are never drawn on top of each other,
+			// so a run that lands inside its predecessor starts where that ended.
+			left := region.Left - cellWidth
+			if i > 0 && left < rightEdge {
+				left = rightEdge
+			}
+			rightEdge = left + chars*cellWidth
 			row.Spans = append(row.Spans, Span{
 				Text:            region.Text,
-				Left:            region.Left,
-				Advance:         advance,
-				Chars:           utf8.RuneCountInString(region.Text),
+				Left:            left,
+				Width:           chars * cellWidth,
+				Chars:           chars,
 				FontWidth:       region.FontWidth,
 				FontHeight:      region.FontHeight,
 				HorizontalSpace: region.HorizontalSpace,

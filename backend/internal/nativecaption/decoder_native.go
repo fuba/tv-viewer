@@ -215,8 +215,10 @@ func collectRegions(decoded string, regions []C.tv_caption_region) []Region {
 		if start < 0 || end > len(decoded) || start >= end {
 			continue
 		}
+		// A drawn space is a real character cell with its own background, which is
+		// what keeps a caption's black band unbroken, so only empty runs are dropped.
 		text := strings.TrimRight(decoded[start:end], "\r\n")
-		if strings.TrimSpace(text) == "" {
+		if text == "" {
 			continue
 		}
 		collected = append(collected, Region{

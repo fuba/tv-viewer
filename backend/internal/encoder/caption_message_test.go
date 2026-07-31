@@ -12,12 +12,12 @@ func placedCaption() nativecaption.Caption {
 		Text:  "（筒井）でも　当たりだろ。\n言わなくても分かるよ。",
 		Plane: nativecaption.Plane{Width: 960, Height: 540},
 		Rows: []nativecaption.Row{
-			{Text: "（筒井）でも　当たりだろ。", Bottom: 448, Spans: []nativecaption.Span{
-				{Text: "（", Left: 378, Advance: 40, FontWidth: 18, FontHeight: 36, HorizontalSpace: 2, Foreground: 0xFFFFFF},
-				{Text: "筒井", Left: 418, FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, Foreground: 0xFFFFFF},
+			{Text: "（筒井）でも　当たりだろ。", Bottom: 449, Height: 60, Spans: []nativecaption.Span{
+				{Text: "（", Left: 358, Width: 20, Chars: 1, FontWidth: 18, FontHeight: 36, HorizontalSpace: 2, Foreground: 0xFFFFFF},
+				{Text: "筒井", Left: 378, Width: 80, Chars: 2, FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, Foreground: 0xFFFFFF},
 			}},
-			{Text: "言わなくても分かるよ。", Bottom: 508, Spans: []nativecaption.Span{
-				{Text: "言わなくても分かるよ。", Left: 418, FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, Foreground: 0xFFFFFF},
+			{Text: "言わなくても分かるよ。", Bottom: 509, Height: 60, Spans: []nativecaption.Span{
+				{Text: "言わなくても分かるよ。", Left: 378, Width: 440, Chars: 11, FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, Foreground: 0xFFFFFF},
 			}},
 		},
 	}
@@ -34,14 +34,17 @@ func TestCaptionMessageCarriesThePlaneAndRows(t *testing.T) {
 	if !ok || len(rows) != 2 {
 		t.Fatalf("rows = %v", message["rows"])
 	}
-	if rows[0]["bottom"] != 448 || rows[1]["bottom"] != 508 {
+	if rows[0]["bottom"] != 449 || rows[1]["bottom"] != 509 {
 		t.Fatalf("rows lost their placement: %v", rows)
+	}
+	if rows[0]["height"] != 60 {
+		t.Fatalf("a row must carry the full character block height: %v", rows[0])
 	}
 	spans, ok := rows[0]["spans"].([]map[string]any)
 	if !ok || len(spans) != 2 {
 		t.Fatalf("spans = %v", rows[0]["spans"])
 	}
-	if spans[0]["fontWidth"] != 18 || spans[0]["fontHeight"] != 36 || spans[0]["advance"] != 40 {
+	if spans[0]["fontWidth"] != 18 || spans[0]["fontHeight"] != 36 || spans[0]["width"] != 20 {
 		t.Fatalf("half width run lost its metrics: %v", spans[0])
 	}
 	if spans[0]["color"] != "#ffffff" {

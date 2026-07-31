@@ -29,7 +29,7 @@
             style="
               left: {style.left}%;
               bottom: {style.bottom}%;
-              min-width: {style.minWidth}%;
+              width: {style.width}%;
               height: {style.height}%;
               font-size: {style.fontSize}cqh;
               color: {style.color};

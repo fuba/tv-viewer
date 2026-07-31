@@ -12,8 +12,8 @@ export interface CaptionPlane {
 export interface CaptionSpanStyle {
   left: number            // % of the plane width
   bottom: number          // % of the plane height
-  minWidth: number        // % of the plane width, so a row paints as one box
-  height: number          // % of the plane height
+  width: number           // % of the plane width: the drawn character blocks
+  height: number          // % of the plane height: the full block height
   fontSize: number        // % of the picture height (cqh)
   letterSpacing: number   // em
   scaleX: number
@@ -31,31 +31,24 @@ function ratio(value: number, total: number): number {
   return (value / total) * 100
 }
 
-// A run has to fit the cells the broadcaster drew it in, and a rendering font
-// is never as narrow as the broadcast one: two normal characters that ARIB
-// advanced by 60 would take 80 in the browser and collide with the next run.
-// The advance to the next run gives the true cell, so scale the glyphs to it.
+// A glyph is drawn at the character height, so a half width run - where ARIB
+// draws a narrow glyph in a narrow cell - has to be squeezed to its own width.
 export function horizontalScale(span: CaptionSpan): number {
-  const fontHeight = span.fontHeight > 0 ? span.fontHeight : 0
-  const glyph = fontHeight + span.charSpace
-  if (!Number.isFinite(glyph) || glyph <= 0) return 1
-  const chars = span.chars && span.chars > 0 ? span.chars : [...span.text].length
-  if (span.advance > 0 && chars > 0) {
-    return Math.min(1, span.advance / chars / glyph)
-  }
-  // The last run of a row has no next run: fall back to its own cell width.
-  const cell = span.fontWidth + span.charSpace
-  if (cell <= 0) return 1
-  return Math.min(1, cell / glyph)
+  if (span.fontHeight <= 0 || span.fontWidth <= 0) return 1
+  return Math.min(1, span.fontWidth / span.fontHeight)
 }
 
+// The background of an ARIB caption covers whole character blocks - the glyph
+// plus the character and line spacing around it - which is why the drawn box
+// carries a margin and why consecutive rows join into one black band.
 export function captionSpanStyle(span: CaptionSpan, row: CaptionRow, plane: CaptionPlane): CaptionSpanStyle {
   const fontHeight = span.fontHeight > 0 ? span.fontHeight : 0
+  const blockHeight = row.height > 0 ? row.height : fontHeight
   return {
     left: ratio(span.left, plane.width),
     bottom: ratio(plane.height - row.bottom, plane.height),
-    minWidth: ratio(span.advance, plane.width),
-    height: ratio(fontHeight, plane.height),
+    width: ratio(span.width, plane.width),
+    height: ratio(blockHeight, plane.height),
     fontSize: ratio(fontHeight, plane.height),
     letterSpacing: fontHeight > 0 ? span.charSpace / fontHeight : 0,
     scaleX: horizontalScale(span),

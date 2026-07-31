@@ -65,10 +65,10 @@ func main() {
 		fmt.Printf("\n#%d PID=%#x duration=%s plane=%dx%d text=%q\n",
 			seen, packet.PID, caption.Duration, caption.Plane.Width, caption.Plane.Height, caption.Text)
 		for i, row := range caption.Rows {
-			fmt.Printf("  row[%d] bottom=%d text=%q\n", i, row.Bottom, row.Text)
+			fmt.Printf("  row[%d] block=[%d,%d) text=%q\n", i, row.Bottom-row.Height, row.Bottom, row.Text)
 			for j, span := range row.Spans {
-				fmt.Printf("    span[%d] left=%d advance=%d font=%dx%d space=%d fg=%d bg=%d alpha=%d/%d text=%q\n",
-					j, span.Left, span.Advance, span.FontWidth, span.FontHeight, span.HorizontalSpace,
+				fmt.Printf("    span[%d] x=[%d,%d) font=%dx%d space=%d fg=%d bg=%d alpha=%d/%d text=%q\n",
+					j, span.Left, span.Left+span.Width, span.FontWidth, span.FontHeight, span.HorizontalSpace,
 					span.Foreground, span.Background, span.ForegroundAlpha, span.BackgroundAlpha, span.Text)
 			}
 		}

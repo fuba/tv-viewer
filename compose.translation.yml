@@ -5,7 +5,8 @@ services:
       VOICETRANSLATE_ORIGIN: ${VOICETRANSLATE_ORIGIN:?Set VOICETRANSLATE_ORIGIN in the deployment environment}
       VOICETRANSLATE_TOKEN_FILE: /run/secrets/voicetranslate-access-token
     secrets:
-      - voicetranslate_access_token
+      - source: voicetranslate_access_token
+        target: /run/secrets/voicetranslate-access-token
 
 secrets:
   voicetranslate_access_token:

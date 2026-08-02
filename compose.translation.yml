@@ -1,0 +1,12 @@
+services:
+  backend:
+    environment:
+      VOICETRANSLATE_URL: ${VOICETRANSLATE_URL:-wss://honyaku.home.fuba.dev/ws}
+      VOICETRANSLATE_ORIGIN: ${VOICETRANSLATE_ORIGIN:-https://honyaku.home.fuba.dev}
+      VOICETRANSLATE_TOKEN_FILE: /run/secrets/voicetranslate-access-token
+    secrets:
+      - voicetranslate_access_token
+
+secrets:
+  voicetranslate_access_token:
+    file: ${VOICETRANSLATE_TOKEN_FILE:?Set VOICETRANSLATE_TOKEN_FILE to the host token file}

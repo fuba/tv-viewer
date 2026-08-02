@@ -1,0 +1,12 @@
+services:
+  backend:
+    environment:
+      VOICETRANSLATE_URL: ${VOICETRANSLATE_URL:?Set VOICETRANSLATE_URL in the deployment environment}
+      VOICETRANSLATE_ORIGIN: ${VOICETRANSLATE_ORIGIN:?Set VOICETRANSLATE_ORIGIN in the deployment environment}
+      VOICETRANSLATE_TOKEN_FILE: /run/secrets/voicetranslate-access-token
+    secrets:
+      - voicetranslate_access_token
+
+secrets:
+  voicetranslate_access_token:
+    file: ${VOICETRANSLATE_TOKEN_FILE:?Set VOICETRANSLATE_TOKEN_FILE to the host token file}

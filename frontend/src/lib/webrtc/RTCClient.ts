@@ -1,4 +1,4 @@
-import type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode } from './types';
+import type { SignalingMessage, SubtitleMessage, TranslationMessage, ConnectionStatus, RTCClientOptions, AudioMode, VideoFormatMessage } from './types';
 
 export class RTCClient {
   private pc: RTCPeerConnection | null = null;
@@ -6,6 +6,7 @@ export class RTCClient {
   private channelId: string;
   private burnInSubtitles: boolean;
   private audioMode: AudioMode;
+  private translationEnabled: boolean;
   private peerId: string | null = null;
   private mediaStream: MediaStream | null = null;
   private dataChannel: RTCDataChannel | null = null;
@@ -15,10 +16,12 @@ export class RTCClient {
   private onTrack?: (track: MediaStreamTrack, stream: MediaStream) => void;
   private onConnectionStateChange?: (state: ConnectionStatus) => void;
   private onSubtitle?: (subtitle: SubtitleMessage) => void;
+  private onTranslation?: (message: TranslationMessage) => void;
+  private onVideoFormat?: (format: VideoFormatMessage) => void;
   private onEncodingRestarted?: (channelId: string, requestId?: string) => void;
   private onError?: (error: Error, requestId?: string) => void;
   private onLog?: (message: string) => void;
-  private pendingRestarts = new Map<string, { channelId: string; burnInSubtitles: boolean; audioMode: AudioMode }>();
+  private pendingRestarts = new Map<string, { channelId: string; burnInSubtitles: boolean; audioMode: AudioMode; translationEnabled: boolean }>();
 
   constructor(options: RTCClientOptions) {
     this.channelId = options.channelId;
@@ -26,9 +29,12 @@ export class RTCClient {
     this.burnInSubtitles = options.burnInSubtitles ?? true;
     // Default to 'both' (stereo) for audio mode
     this.audioMode = options.audioMode ?? 'both';
+    this.translationEnabled = options.translationEnabled ?? false;
     this.onTrack = options.onTrack;
     this.onConnectionStateChange = options.onConnectionStateChange;
     this.onSubtitle = options.onSubtitle;
+    this.onTranslation = options.onTranslation;
+    this.onVideoFormat = options.onVideoFormat;
     this.onEncodingRestarted = options.onEncodingRestarted;
     this.onError = options.onError;
     this.onLog = options.onLog;
@@ -53,7 +59,10 @@ export class RTCClient {
       this.createPeerConnection();
 
       // Request stream start (include burnInSubtitles and audioMode settings)
-      this.sendMessage({ type: 'stream-start', channelId: this.channelId, burnInSubtitles: this.burnInSubtitles, audioMode: this.audioMode });
+      this.sendMessage({
+        type: 'stream-start', channelId: this.channelId, burnInSubtitles: this.burnInSubtitles,
+        audioMode: this.audioMode, translationEnabled: this.translationEnabled,
+      });
 
       // Start ping interval
       this.startPingInterval();
@@ -198,10 +207,19 @@ export class RTCClient {
           } else {
             dataStr = msgEvent.data;
           }
-          const subtitle = JSON.parse(dataStr) as SubtitleMessage;
-          this.onSubtitle?.(subtitle);
+          // The data channel carries captions and picture geometry.
+          const message = JSON.parse(dataStr) as { type?: string };
+          if (message?.type === 'video-format') {
+            this.onVideoFormat?.(message as VideoFormatMessage);
+            return;
+          }
+          if (message?.type === 'translation-caption' || message?.type === 'translation-status') {
+            this.onTranslation?.(message as TranslationMessage);
+            return;
+          }
+          this.onSubtitle?.(message as SubtitleMessage);
         } catch (e) {
-          this.log(`Failed to parse subtitle: ${e}`);
+          this.log(`Failed to parse data channel message: ${e}`);
         }
       };
     };
@@ -254,6 +272,7 @@ export class RTCClient {
               this.channelId = pending.channelId;
               this.burnInSubtitles = pending.burnInSubtitles;
               this.audioMode = pending.audioMode;
+              this.translationEnabled = pending.translationEnabled;
               this.pendingRestarts.delete(msg.requestId);
             }
           } else if (msg.channelId) {
@@ -410,14 +429,18 @@ export class RTCClient {
    * - Switching audio mode (dual mono)
    * @param options - New settings to apply
    */
-  restartEncoding(options: { channelId?: string; burnInSubtitles?: boolean; audioMode?: AudioMode }): string {
+  restartEncoding(options: { channelId?: string; burnInSubtitles?: boolean; audioMode?: AudioMode; translationEnabled?: boolean }): string {
     const newChannelId = options.channelId ?? this.channelId;
     const newBurnInSubtitles = options.burnInSubtitles ?? this.burnInSubtitles;
     const newAudioMode = options.audioMode ?? this.audioMode;
+    const newTranslationEnabled = options.translationEnabled ?? this.translationEnabled;
     const requestId = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 
-    this.log(`Restarting encoding: channel=${newChannelId}, burnInSubtitles=${newBurnInSubtitles}, audioMode=${newAudioMode}`);
-    this.pendingRestarts.set(requestId, { channelId: newChannelId, burnInSubtitles: newBurnInSubtitles, audioMode: newAudioMode });
+    this.log(`Restarting encoding: channel=${newChannelId}, burnInSubtitles=${newBurnInSubtitles}, audioMode=${newAudioMode}, translation=${newTranslationEnabled}`);
+    this.pendingRestarts.set(requestId, {
+      channelId: newChannelId, burnInSubtitles: newBurnInSubtitles,
+      audioMode: newAudioMode, translationEnabled: newTranslationEnabled,
+    });
 
     this.sendMessage({
       type: 'restart-encoding',
@@ -425,6 +448,7 @@ export class RTCClient {
       channelId: newChannelId,
       burnInSubtitles: newBurnInSubtitles,
       audioMode: newAudioMode,
+      translationEnabled: newTranslationEnabled,
     });
     return requestId;
   }
@@ -436,6 +460,11 @@ export class RTCClient {
   setAudioMode(mode: AudioMode): string {
     this.log(`Setting audio mode: ${mode}`);
     return this.restartEncoding({ audioMode: mode });
+  }
+
+  setTranslationEnabled(enabled: boolean): string {
+    this.log(`Setting translation: ${enabled ? 'enabled' : 'disabled'}`);
+    return this.restartEncoding({ translationEnabled: enabled });
   }
 
   /**
@@ -451,6 +480,10 @@ export class RTCClient {
   getAudioMode(): AudioMode {
     return this.audioMode;
   }
+
+  getTranslationEnabled(): boolean {
+    return this.translationEnabled;
+  }
 }
 
-export type { SignalingMessage, SubtitleMessage, ConnectionStatus, RTCClientOptions, AudioMode };
+export type { SignalingMessage, SubtitleMessage, TranslationMessage, ConnectionStatus, RTCClientOptions, AudioMode, VideoFormatMessage };

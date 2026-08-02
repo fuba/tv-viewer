@@ -19,10 +19,10 @@
     </div>
     <div class="log-view">
       {#if debugLogs.length === 0}
-        <p class="text-gray-500 text-xs">ログはありません</p>
+        <p class="log-empty">ログはありません</p>
       {:else}
         {#each debugLogs as log}
-          <div class="text-xs font-mono mb-1 text-green-400">
+          <div class="log-line">
             {log}
           </div>
         {/each}
@@ -43,10 +43,10 @@
     </div>
     <div class="log-view">
     {#if pipelineLogs.length === 0}
-        <p class="text-gray-500 text-xs">パイプラインログはありません</p>
+        <p class="log-empty">パイプラインログはありません</p>
       {:else}
         {#each pipelineLogs as log}
-          <div class="text-xs font-mono mb-1 text-yellow-400 whitespace-pre-wrap">
+          <div class="log-line is-pipeline">
             {log}
           </div>
         {/each}
@@ -63,11 +63,14 @@
 
 <style>
   .diagnostics { display: grid; gap: .75rem; }
-  .diagnostic-card { padding: .85rem; border: 1px solid var(--line); border-radius: .8rem; background: var(--surface); }
-  .diagnostic-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: .65rem; }
-  .diagnostic-header h3 { color: var(--text-secondary); font-size: .8rem; font-weight: 700; }
-  .clear-button { min-height: 2rem; padding: 0 .6rem; border-radius: .45rem; color: #e98c94; font-size: .7rem; }
-  .clear-button:hover { background: rgb(233 140 148 / 10%); }
-  .log-view { height: 9rem; overflow-y: auto; padding: .7rem; border-radius: .55rem; background: #07090b; }
-  .diagnostic-status { padding: .65rem .2rem 0; color: var(--muted); font-size: .72rem; }
+  .diagnostic-card { padding: .8rem; border: 1px solid var(--line); background: var(--surface); }
+  .diagnostic-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: .6rem; }
+  .diagnostic-header h3 { color: var(--text-secondary); font-size: .78rem; font-weight: 650; }
+  .clear-button { min-height: 2rem; padding: 0 .6rem; border-radius: .25rem; color: var(--muted); font-size: .7rem; }
+  .clear-button:hover { background: var(--surface-hover); color: var(--text); }
+  .log-view { height: 9rem; overflow-y: auto; padding: .6rem; background: #000; }
+  .log-empty { color: var(--muted); font-size: .7rem; }
+  .log-line { margin-bottom: .2rem; color: var(--text-secondary); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .68rem; }
+  .log-line.is-pipeline { color: var(--muted); white-space: pre-wrap; }
+  .diagnostic-status { padding: .5rem .1rem 0; color: var(--muted); font-size: .72rem; }
 </style>

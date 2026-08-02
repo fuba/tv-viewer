@@ -17,6 +17,7 @@ import (
 )
 
 var ErrPeerLimit = errors.New("peer limit reached")
+var ErrDataChannelNotOpen = errors.New("subtitle data channel is not open")
 
 // Peer represents a WebRTC peer connection with associated tracks
 type Peer struct {
@@ -33,6 +34,8 @@ type Peer struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	h264Parser *H264Parser
+	dataOpen   chan struct{}
+	dataOnce   sync.Once
 
 	// Streaming context - can be cancelled and replaced without closing the peer connection
 	streamCtx    context.Context
@@ -180,7 +183,9 @@ func (pm *PeerManager) createPeerLocked(channelID string) (*Peer, error) {
 		streamCtx:    streamCtx,
 		streamCancel: streamCancel,
 		h264Parser:   NewH264Parser(),
+		dataOpen:     make(chan struct{}),
 	}
+	dataChan.OnOpen(peer.markDataChannelOpen)
 
 	// Set up ICE candidate handler
 	pc.OnICECandidate(func(candidate *webrtc.ICECandidate) {
@@ -313,9 +318,31 @@ func (p *Peer) WriteAudioSample(data []byte, duration time.Duration) error {
 // SendSubtitle sends a subtitle message via data channel
 func (p *Peer) SendSubtitle(data []byte) error {
 	if p.DataChan == nil || p.DataChan.ReadyState() != webrtc.DataChannelStateOpen {
-		return nil // Silently ignore if data channel not ready
+		return ErrDataChannelNotOpen
 	}
 	return p.DataChan.Send(data)
+}
+
+func (p *Peer) markDataChannelOpen() {
+	if p == nil || p.dataOpen == nil {
+		return
+	}
+	p.dataOnce.Do(func() { close(p.dataOpen) })
+}
+
+// WaitDataChannelOpen keeps bootstrap messages queued until SCTP is usable.
+func (p *Peer) WaitDataChannelOpen(ctx context.Context) error {
+	if p == nil || p.dataOpen == nil || p.ctx == nil {
+		return ErrDataChannelNotOpen
+	}
+	select {
+	case <-p.dataOpen:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-p.ctx.Done():
+		return p.ctx.Err()
+	}
 }
 
 // StreamH264 reads H.264 data from reader and streams to the peer

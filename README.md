@@ -36,6 +36,11 @@
   - NVENC（NVIDIA GPU）ハードウェア加速
   - 効率的なH.264/Opusエンコーディング
 
+- **🌐 ライブ翻訳（オプション）**
+  - VoiceTranslateによる音声認識・日本語字幕
+  - 認識完了後、数秒遅れて再生するVOICEVOX:ずんだもん音声へのWebRTCトラック置換
+  - 画面内に収まるARIB風の翻訳字幕オーバーレイ
+
 ## 技術スタック
 
 ### バックエンド
@@ -108,6 +113,8 @@ EPG_CACHE_TTL_SECONDS=30
 ```
 
 The EPG endpoint uses the program guide service at `PROGRAM_API_URL` (`/services` and `/search`) and keeps results in memory for the configured TTL. The server permits one tuned channel at a time and fans its single encoded stream out to every viewer. New browsers automatically join the active service. While multiple viewers are connected, channel, audio, and subtitle settings are locked to keep all viewers on that shared pipeline.
+
+VoiceTranslateの秘密情報設定、音声置換の動作、遅延上の制約は [doc/32-voice-translation.md](doc/32-voice-translation.md) を参照してください。
 
 ## API仕様
 

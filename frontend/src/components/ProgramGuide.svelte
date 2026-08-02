@@ -145,29 +145,25 @@
         <!-- svelte-ignore a11y-no-static-element-interactions -->
         <button class="current-program"
              on:click={() => openProgramDetail(currentProgram)}>
-          <div class="flex items-center justify-between mb-1">
-            <span class="text-xs font-medium text-blue-400">現在放送中</span>
-            <span class="text-xs text-gray-400">残り {getTimeRemaining(currentProgram)}</span>
+          <div class="program-meta">
+            <span class="program-badge">放送中</span>
+            <span>残り {getTimeRemaining(currentProgram)}</span>
           </div>
-          <div class="text-sm font-medium mb-1 text-white">{currentProgram.name}</div>
-          <div class="text-xs text-gray-400 mb-2">
+          <div class="program-title">{currentProgram.name}</div>
+          <div class="program-meta">
             {formatTime(currentProgram.startAt)} - {formatTime(currentProgram.startAt + currentProgram.duration)}
-            <span class="text-gray-500">({formatDuration(currentProgram.duration)})</span>
+            <span>({formatDuration(currentProgram.duration)})</span>
           </div>
-          
+
           {#if currentProgram.description}
-            <div class="text-xs text-gray-300 mb-2 line-clamp-2">
+            <div class="program-desc line-clamp-2">
               {currentProgram.description}
             </div>
           {/if}
-          
-          <!-- Progress Bar -->
-          <div class="w-full bg-gray-700 rounded-full h-1.5">
-            <div class="bg-blue-500 h-1.5 rounded-full transition-all duration-1000" 
-                 style="width: {getProgress(currentProgram)}%"></div>
+
+          <div class="progress-track">
+            <div class="progress-value" style="width: {getProgress(currentProgram)}%"></div>
           </div>
-          
-          <!-- Click hint -->
         </button>
       {/if}
       
@@ -183,16 +179,16 @@
               <!-- svelte-ignore a11y-no-static-element-interactions -->
               <button class="upcoming-program"
                    on:click={() => openProgramDetail(program)}>
-                <div class="flex items-start justify-between mb-1">
-                  <div class="text-sm font-medium text-gray-200 flex-1 pr-2">{program.name}</div>
-                  <div class="text-xs text-gray-500 flex-shrink-0">#{index + 1}</div>
+                <div class="program-row">
+                  <div class="program-title">{program.name}</div>
+                  <div class="program-index">#{index + 1}</div>
                 </div>
-                <div class="text-xs text-gray-400 mb-1">
+                <div class="program-meta">
                   {formatTime(program.startAt)} - {formatTime(program.startAt + program.duration)}
-                  <span class="text-gray-500">({formatDuration(program.duration)})</span>
+                  <span>({formatDuration(program.duration)})</span>
                 </div>
                 {#if program.description}
-                  <div class="text-xs text-gray-400 line-clamp-1">
+                  <div class="program-desc line-clamp-1">
                     {program.description}
                   </div>
                 {/if}
@@ -230,16 +226,24 @@
   }
 
   .compact-guide { min-height: 8rem; }
-  .compact-guide > h2 { margin-bottom: .8rem; color: var(--muted); font-size: .75rem; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+  .compact-guide > h2 { margin-bottom: .7rem; color: var(--muted); font-size: .72rem; font-weight: 650; letter-spacing: .06em; }
   .guide-message { padding: 1rem 0; color: var(--muted); font-size: .85rem; }
   .guide-content { display: grid; grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr); gap: .75rem; }
   .current-program, .upcoming-program { width: 100%; border: 1px solid var(--line); background: var(--surface); text-align: left; }
-  .current-program { padding: 1rem; border-color: rgb(119 212 222 / 35%); border-radius: .85rem; }
+  .current-program { padding: .9rem; border-color: var(--line-strong); }
   .current-program:hover, .upcoming-program:hover { border-color: var(--line-strong); background: var(--surface-hover); }
   .upcoming-programs { min-width: 0; }
-  .upcoming-heading { position: sticky; top: 0; z-index: 1; padding: .35rem .2rem; background: var(--surface-overlay); color: var(--muted); font-size: .72rem; font-weight: 650; }
-  .upcoming-list { display: grid; gap: .4rem; max-height: 18rem; overflow-y: auto; }
-  .upcoming-program { padding: .7rem; border-radius: .65rem; }
+  .upcoming-heading { position: sticky; top: 0; z-index: 1; padding: .3rem 0 .45rem; background: var(--canvas); color: var(--muted); font-size: .72rem; font-weight: 600; }
+  .upcoming-list { display: grid; gap: 1px; max-height: 18rem; overflow-y: auto; }
+  .upcoming-program { padding: .65rem .7rem; }
+  .program-row { display: flex; align-items: flex-start; justify-content: space-between; gap: .5rem; }
+  .program-title { color: var(--text); font-size: .82rem; font-weight: 600; line-height: 1.35; }
+  .program-index { flex: 0 0 auto; color: var(--muted); font-size: .68rem; }
+  .program-meta { display: flex; align-items: center; justify-content: space-between; gap: .5rem; margin: .3rem 0; color: var(--muted); font-size: .7rem; }
+  .program-badge { color: var(--text); font-weight: 650; }
+  .program-desc { margin-bottom: .45rem; color: var(--text-secondary); font-size: .72rem; line-height: 1.5; }
+  .progress-track { height: 2px; overflow: hidden; background: var(--surface-active); }
+  .progress-value { height: 100%; background: var(--accent); transition: width 1s linear; }
   @media (max-width: 640px) {
     .guide-content { grid-template-columns: 1fr; }
     .upcoming-list { max-height: 16rem; }

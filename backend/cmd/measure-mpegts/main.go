@@ -186,7 +186,7 @@ func main() {
 								fps = 60
 							}
 							if adaptiveDecoder != nil {
-								nvEncoder, err = nativevideo.NewNVEncoderForAdaptiveDecoder(decoded[0].Width, decoded[0].Height, fps, 8_000_000, adaptiveDecoder)
+								nvEncoder, err = nativevideo.NewNVEncoderForAdaptiveDecoder(decoded[0].Width, decoded[0].Height, fps, 8_000_000, nativevideo.DisplayAspect{}, adaptiveDecoder)
 							} else {
 								nvEncoder, err = nativevideo.NewNVEncoder(decoded[0].Width, decoded[0].Height, fps, 8_000_000)
 							}

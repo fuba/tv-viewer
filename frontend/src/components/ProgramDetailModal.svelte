@@ -142,9 +142,9 @@
         <!-- Progress for current program -->
         {#if program.startAt <= Date.now() && program.startAt + program.duration > Date.now()}
           <div class="progress-section">
-            <div class="flex justify-between items-center mb-2">
-              <span class="text-sm font-medium text-blue-400">現在放送中</span>
-              <span class="text-sm text-gray-400">残り {getTimeRemaining(program)}</span>
+            <div class="progress-meta">
+              <span class="progress-badge">放送中</span>
+              <span>残り {getTimeRemaining(program)}</span>
             </div>
             <div class="progress-track">
               <div class="progress-value"
@@ -156,8 +156,8 @@
         <!-- Description -->
         {#if program.description}
           <div class="description-section">
-            <h3 class="text-sm font-semibold text-gray-400 mb-2">番組内容</h3>
-            <p class="text-gray-200 whitespace-pre-wrap">{program.description}</p>
+            <h3>番組内容</h3>
+            <p class="whitespace-pre-wrap">{program.description}</p>
           </div>
         {/if}
 
@@ -195,7 +195,7 @@
         <!-- Additional Info -->
         {#if program.eventId || program.serviceId}
           <div class="additional-info">
-            <div class="text-xs text-gray-500">
+            <div class="additional-ids">
               {#if program.eventId}
                 <span>イベントID: {program.eventId}</span>
               {/if}
@@ -387,83 +387,88 @@
     }
   }
 
-  /* Minimal responsive dialog overrides. */
+  /* Minimal monochrome dialog overrides. */
   .modal-backdrop {
     padding: 1.25rem;
-    background: rgb(2 4 7 / 76%);
-    backdrop-filter: blur(10px);
+    background: rgb(0 0 0 / 80%);
   }
 
   .modal-content {
     width: min(42rem, 100%);
     height: auto;
     max-height: min(88vh, 52rem);
-    border: 1px solid var(--line);
-    border-radius: 1.1rem;
-    background: var(--surface-overlay);
-    box-shadow: 0 24px 80px rgb(0 0 0 / 50%);
+    border: 1px solid var(--line-strong);
+    border-radius: 0;
+    background: var(--canvas);
+    box-shadow: none;
   }
 
   .modal-header {
     align-items: flex-start;
     gap: 1rem;
-    padding: 1.35rem 1.5rem 1.1rem;
+    padding: 1.1rem 1.2rem 1rem;
     border-bottom-color: var(--line);
   }
 
   .modal-header h2 {
     color: var(--text);
-    font-size: clamp(1.2rem, 3vw, 1.65rem);
-    font-weight: 720;
-    line-height: 1.35;
-    letter-spacing: -.02em;
+    font-size: clamp(1.05rem, 2.6vw, 1.4rem);
+    font-weight: 650;
+    line-height: 1.4;
+    letter-spacing: -.01em;
   }
 
   .channel-eyebrow {
-    margin-bottom: .35rem;
-    color: var(--accent);
-    font-size: .75rem;
-    font-weight: 700;
+    margin-bottom: .3rem;
+    color: var(--muted);
+    font-size: .72rem;
+    font-weight: 600;
     letter-spacing: .06em;
   }
 
   .close-button {
-    width: 2.5rem;
-    height: 2.5rem;
-    border-radius: 50%;
+    width: 2.4rem;
+    height: 2.4rem;
+    border-radius: .25rem;
     color: var(--muted);
     font-size: 1rem;
   }
 
   .close-button:hover { background: var(--surface-hover); color: var(--text); }
 
-  .modal-body { padding: 1.35rem 1.5rem 1.5rem; font-size: .95rem; }
+  .modal-body { padding: 1.15rem 1.2rem 1.3rem; font-size: .95rem; }
   .info-section { display: grid; gap: .45rem; margin-bottom: 1.2rem; }
   .info-row { margin: 0; }
   .info-label { width: 5.5rem; color: var(--muted); font-size: .78rem; font-weight: 600; }
   .info-value { color: var(--text-secondary); font-size: .88rem; }
-  .progress-section { padding: 1rem; margin-bottom: 1.25rem; border: 1px solid var(--line); border-radius: .8rem; background: var(--surface); }
-  .progress-track { height: .25rem; overflow: hidden; border-radius: 1rem; background: var(--surface-active); }
-  .progress-value { height: 100%; border-radius: inherit; background: var(--accent); }
-  .description-section { margin-bottom: 1.25rem; }
-  .description-section h3 { margin-bottom: .5rem; color: var(--muted); font-size: .75rem; }
-  .description-section p { color: var(--text-secondary); font-size: .92rem; line-height: 1.75; }
-  .action-section { display: grid; grid-template-columns: 1fr 1fr; gap: .65rem; margin-top: 1.25rem; }
-  .watch-button, .reservation-button { min-height: 3rem; border-radius: .75rem; padding: .75rem 1rem; font-weight: 700; }
-  .watch-button { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; background: var(--accent); color: #041014; }
-  .watch-button:hover { background: var(--accent-strong); }
+  .progress-section { padding: .9rem; margin-bottom: 1.2rem; border: 1px solid var(--line); border-radius: 0; background: var(--surface); }
+  .progress-meta { display: flex; align-items: center; justify-content: space-between; margin-bottom: .6rem; color: var(--muted); font-size: .78rem; }
+  .progress-badge { color: var(--text); font-weight: 650; }
+  .progress-track { height: 2px; overflow: hidden; background: var(--surface-active); }
+  .progress-value { height: 100%; background: var(--accent); }
+  .description-section { margin-bottom: 1.2rem; }
+  .description-section h3 { margin-bottom: .5rem; color: var(--muted); font-size: .75rem; font-weight: 600; }
+  .description-section p { color: var(--text-secondary); font-size: .9rem; line-height: 1.75; }
+  .additional-info { border-top-color: var(--line); }
+  .additional-ids { color: var(--muted); font-size: .7rem; }
+  .action-section { display: grid; grid-template-columns: 1fr 1fr; gap: .5rem; margin-top: 1.2rem; }
+  .watch-button, .reservation-button { min-height: 2.8rem; border-radius: 0; padding: .7rem 1rem; font-size: .85rem; font-weight: 650; }
+  .watch-button { display: inline-flex; align-items: center; justify-content: center; gap: .45rem; background: var(--accent); color: #000; }
+  .watch-button:hover { background: #e2e2e2; }
   .watch-button svg { width: 1rem; height: 1rem; fill: currentColor; }
-  .reservation-button { background: var(--surface-active); color: var(--text); }
-  .reservation-button:hover:not(:disabled) { background: #583039; }
-  .reservation-button.reserved { background: #234d3e; }
+  .reservation-button { border: 1px solid var(--line-strong); background: transparent; color: var(--text); }
+  .reservation-button:hover:not(:disabled) { background: var(--surface-hover); }
+  .reservation-button.reserved { border-color: var(--accent); background: var(--accent-soft); }
+  .reservation-help { color: var(--muted); font-size: .72rem; }
+  .reservation-error { color: var(--danger); font-size: .72rem; }
   .reservation-help, .reservation-error { grid-column: 1 / -1; margin-top: 0; }
 
   @media (max-width: 640px) {
     .modal-backdrop { align-items: flex-end; padding: 0; }
-    .modal-content { width: 100%; max-height: 92dvh; border-width: 1px 0 0; border-radius: 1.2rem 1.2rem 0 0; }
-    .modal-header { padding: 1.1rem 1rem .9rem; }
-    .modal-body { padding: 1rem; padding-bottom: calc(1rem + env(safe-area-inset-bottom)); }
+    .modal-content { width: 100%; max-height: 92dvh; border-width: 1px 0 0; }
+    .modal-header { padding: 1rem .9rem .85rem; }
+    .modal-body { padding: .9rem; padding-bottom: calc(.9rem + env(safe-area-inset-bottom)); }
     .action-section { grid-template-columns: 1fr; }
-    .watch-button, .reservation-button { min-height: 3.25rem; }
+    .watch-button, .reservation-button { min-height: 3rem; }
   }
 </style>

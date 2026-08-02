@@ -105,21 +105,22 @@
 
 <style>
   .channel-picker { min-height: 12rem; }
-  .channel-message { padding: 1rem; color: var(--muted); text-align: center; }
-  .channel-tabs { display: inline-flex; gap: .25rem; padding: .25rem; margin-bottom: 1rem; border-radius: .75rem; background: var(--surface-raised); }
-  .channel-tabs button { min-height: 2.5rem; padding: 0 1rem; border-radius: .55rem; color: var(--muted); font-size: .875rem; font-weight: 650; }
-  .channel-tabs button.active { background: var(--surface-active); color: var(--text); box-shadow: 0 1px 8px rgb(0 0 0 / 18%); }
-  .channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: .55rem; max-height: min(48vh, 30rem); overflow-y: auto; padding: .1rem; }
-  .channel-card { min-height: 4.5rem; padding: .85rem; border: 1px solid var(--line); border-radius: .8rem; background: var(--surface); text-align: left; transition: border-color .15s, background .15s, transform .15s; }
-  .channel-card:hover:not(:disabled) { border-color: var(--line-strong); background: var(--surface-hover); transform: translateY(-1px); }
+  .channel-message { padding: 1rem 0; color: var(--muted); font-size: .85rem; }
+  .channel-tabs { display: inline-flex; gap: .2rem; margin-bottom: .85rem; }
+  .channel-tabs button { min-height: 2.2rem; padding: 0 .85rem; border-radius: .25rem; color: var(--muted); font-size: .8rem; font-weight: 600; }
+  .channel-tabs button:hover { color: var(--text-secondary); }
+  .channel-tabs button.active { background: var(--accent-soft); color: var(--text); }
+  .channel-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(10rem, 1fr)); gap: 1px; max-height: min(48vh, 30rem); overflow-y: auto; }
+  .channel-card { min-height: 3.6rem; padding: .7rem .8rem; border: 1px solid var(--line); background: var(--surface); text-align: left; transition: background .12s, border-color .12s; }
+  .channel-card:hover:not(:disabled) { border-color: var(--line-strong); background: var(--surface-hover); }
   .channel-card.selected { border-color: var(--accent); background: var(--accent-soft); }
-  .channel-card.locked { opacity: .38; cursor: not-allowed; }
-  .channel-name { color: var(--text); font-size: .9rem; font-weight: 650; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .channel-number { margin-top: .4rem; color: var(--muted); font-size: .72rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .channel-card.locked { opacity: .35; cursor: not-allowed; }
+  .channel-name { color: var(--text); font-size: .85rem; font-weight: 600; line-height: 1.25; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .channel-number { margin-top: .3rem; color: var(--muted); font-size: .7rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   @media (max-width: 640px) {
     .channel-tabs { display: flex; }
     .channel-tabs button { flex: 1; padding: 0 .7rem; }
     .channel-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 52vh; }
-    .channel-card { min-height: 4rem; padding: .7rem; }
+    .channel-card { min-height: 3.4rem; padding: .6rem; }
   }
 </style>

@@ -72,15 +72,23 @@ frontend/src/
 │   └── types/
 │       └── epg.ts                   # EPG型定義
 └── components/
-    ├── VideoPlayer.svelte           # WebRTC再生
+    ├── VideoPlayer.svelte           # WebRTC再生 + 唯一のコントロールバー
     ├── ChannelList.svelte           # チャンネル一覧 (GR/BS/CSタブ)
     ├── EPGGrid.svelte               # 番組表グリッド (ラテ欄)
     ├── ProgramGuide.svelte          # 番組表表示
-    ├── MetaBar.svelte               # 接続状態表示バー
-    ├── OverlayPanel.svelte          # オーバーレイパネルUI
+    ├── OverlayPanel.svelte          # 全画面オーバーレイUI
     ├── SettingsPanel.svelte         # 設定パネル
-    └── TunerStatus.svelte           # チューナー状態表示
+    └── TunerStatus.svelte           # チューナー状態表示 (コントロールバー内)
 ```
+
+### UIレイアウト方針 (マージンレス)
+
+- 画面全体 (100dvh) が映像。`.video-stage` に内接する 16:9 の `.video-frame` を
+  JS (`viewportFit.ts`) で算出し、常に画面端まで映像が届く。
+- コントロールは**1本のバーのみ**（映像上にオーバーレイ、2.6秒で自動フェード）。
+  トップバー・メタバー・`<video controls>` は廃止。チャンネル名と接続状態はここだけに出す。
+- 起動時は番組表を最初に開く。ただし既に配信中のチャンネルがあれば映像へ直行。
+- 配色はモノトーン（`app.css` の CSS 変数）。`backdrop-filter` やグロー影は使わない。
 
 ## WebRTC v2 データフロー
 

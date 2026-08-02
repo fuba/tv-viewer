@@ -18,6 +18,7 @@ import (
 
 	"github.com/fuba/tv-viewer/internal/encoder"
 	"github.com/fuba/tv-viewer/internal/mirakurun"
+	"github.com/fuba/tv-viewer/internal/voicetranslate"
 	"github.com/fuba/tv-viewer/internal/webrtc"
 	"github.com/gin-gonic/gin"
 	gorillawebsocket "github.com/gorilla/websocket"
@@ -36,18 +37,19 @@ func init() {
 
 // streamingContext holds the state for one WebSocket subscriber.
 type streamingContext struct {
-	channelID       string
-	burnInSubtitles bool
-	audioMode       encoder.AudioMode // Dual mono mode: "main", "sub", "both"
-	mirakurunURL    string
-	peer            *webrtc.Peer
-	session         *encoder.WebRTCSession
-	mu              sync.Mutex
-	stopCh          chan struct{}
-	retryCount      int
-	maxRetries      int
-	shared          *sharedSession
-	stopOnce        sync.Once
+	channelID          string
+	burnInSubtitles    bool
+	audioMode          encoder.AudioMode // Dual mono mode: "main", "sub", "both"
+	translationEnabled bool
+	mirakurunURL       string
+	peer               *webrtc.Peer
+	session            *encoder.WebRTCSession
+	mu                 sync.Mutex
+	stopCh             chan struct{}
+	retryCount         int
+	maxRetries         int
+	shared             *sharedSession
+	stopOnce           sync.Once
 }
 
 type cancelReadCloser struct {
@@ -161,9 +163,9 @@ func startStreamingWithRetry(ctx *streamingContext, safeWrite func(int, []byte) 
 
 	ctx.mu.Lock()
 	if existing := sharedSessions.get(ctx.channelID); existing != nil {
-		if !existing.matchesSettings(ctx.burnInSubtitles, ctx.audioMode) {
+		if !existing.matchesSettings(ctx.burnInSubtitles, ctx.audioMode, ctx.translationEnabled) {
 			ctx.mu.Unlock()
-			return fmt.Errorf("channel %s is already streaming with different audio/subtitle settings", ctx.channelID)
+			return fmt.Errorf("channel %s is already streaming with different audio/subtitle/translation settings", ctx.channelID)
 		}
 		ctx.shared = existing
 		ctx.session = existing.session
@@ -244,7 +246,7 @@ func startStreamingWithRetry(ctx *streamingContext, safeWrite func(int, []byte) 
 	ctx.audioMode = audioMode
 	var session *encoder.WebRTCSession
 	log.Printf("[WebRTC] Using native Go MPEG-TS pipeline for channel %s", ctx.channelID)
-	session, err = encoderInstance.StartNativeWebRTCEncoding(ctx.channelID, stream, streamURL, target.programNumbers, ctx.burnInSubtitles, audioMode)
+	session, err = encoderInstance.StartNativeWebRTCEncoding(ctx.channelID, stream, streamURL, target.programNumbers, ctx.burnInSubtitles, audioMode, ctx.translationEnabled)
 	if err != nil {
 		if closeErr := stream.Close(); closeErr != nil {
 			log.Printf("[WebRTC] Failed to close rejected stream: %v", closeErr)
@@ -260,7 +262,7 @@ func startStreamingWithRetry(ctx *streamingContext, safeWrite func(int, []byte) 
 		return context.Canceled
 	}
 
-	shared := sharedSessions.register(ctx.channelID, session, ctx.burnInSubtitles, audioMode)
+	shared := sharedSessions.register(ctx.channelID, session, ctx.burnInSubtitles, audioMode, ctx.translationEnabled)
 	if shared.session != session {
 		// Another request won the registration race. Release the duplicate encoder.
 		session.Stop()
@@ -304,6 +306,16 @@ func parseAudioMode(value *string) (encoder.AudioMode, error) {
 	}
 }
 
+func validateTranslationConfig(enabled bool) error {
+	if !enabled {
+		return nil
+	}
+	if _, err := voicetranslate.ConfigFromEnv(); err != nil {
+		return fmt.Errorf("translation is not configured: %w", err)
+	}
+	return nil
+}
+
 // SetupWebRTCRoutes adds WebRTC-specific routes
 func SetupWebRTCRoutes(api *gin.RouterGroup) {
 	// WebRTC signaling endpoints
@@ -345,7 +357,8 @@ func startWebRTCStream(c *gin.Context) {
 	}
 	streamCtx := &streamingContext{
 		channelID: channelID, burnInSubtitles: true, audioMode: encoder.AudioModeBoth,
-		mirakurunURL: mirakurunURL, peer: peer, stopCh: make(chan struct{}), maxRetries: 5,
+		translationEnabled: false,
+		mirakurunURL:       mirakurunURL, peer: peer, stopCh: make(chan struct{}), maxRetries: 5,
 	}
 	if err := startStreamingWithRetry(streamCtx, func(int, []byte) error { return nil }); err != nil {
 		peerManager.RemovePeer(peer.ID)
@@ -543,6 +556,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 		return
 	}
 
+	translationAuthorized := translationRequestAllowed(c.Request)
 	conn, err := wsUpgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Printf("[WebRTC] WebSocket upgrade failed: %v", err)
@@ -662,7 +676,16 @@ func handleWebRTCSignaling(c *gin.Context) {
 				sendErrorSafe("", err.Error())
 				continue
 			}
-			log.Printf("[WebRTC] Starting stream for channel %s (burnInSubtitles=%v, audioMode=%s)", channelID, burnInSubtitles, audioMode)
+			translationEnabled := msg.TranslationEnabled != nil && *msg.TranslationEnabled
+			if translationEnabled && !translationAuthorized {
+				sendErrorSafe("", "translation requires an allowed browser origin")
+				continue
+			}
+			if err := validateTranslationConfig(translationEnabled); err != nil {
+				sendErrorSafe("", err.Error())
+				continue
+			}
+			log.Printf("[WebRTC] Starting stream for channel %s (burnInSubtitles=%v, audioMode=%s, translation=%v)", channelID, burnInSubtitles, audioMode, translationEnabled)
 
 			// Stop existing streaming context and session
 			if streamCtx != nil {
@@ -710,13 +733,14 @@ func handleWebRTCSignaling(c *gin.Context) {
 
 			// Create streaming context with retry support
 			streamCtx = &streamingContext{
-				channelID:       channelID,
-				burnInSubtitles: burnInSubtitles,
-				audioMode:       audioMode,
-				mirakurunURL:    mirakurunURL,
-				peer:            peer,
-				stopCh:          make(chan struct{}),
-				maxRetries:      5, // Max 5 retries on crash
+				channelID:          channelID,
+				burnInSubtitles:    burnInSubtitles,
+				audioMode:          audioMode,
+				translationEnabled: translationEnabled,
+				mirakurunURL:       mirakurunURL,
+				peer:               peer,
+				stopCh:             make(chan struct{}),
+				maxRetries:         5, // Max 5 retries on crash
 			}
 
 			// Start streaming with automatic retry on native pipeline failure
@@ -799,7 +823,16 @@ func handleWebRTCSignaling(c *gin.Context) {
 				sendRequestErrorSafe(peer.ID, msg.RequestID, err.Error())
 				continue
 			}
-			log.Printf("[WebRTC] Restarting encoding for channel %s -> %s (burnInSubtitles=%v, audioMode=%s)", channelID, newChannelID, burnInSubtitles, audioMode)
+			translationEnabled := msg.TranslationEnabled != nil && *msg.TranslationEnabled
+			if translationEnabled && !translationAuthorized {
+				sendRequestErrorSafe(peer.ID, msg.RequestID, "translation requires an allowed browser origin")
+				continue
+			}
+			if err := validateTranslationConfig(translationEnabled); err != nil {
+				sendRequestErrorSafe(peer.ID, msg.RequestID, err.Error())
+				continue
+			}
+			log.Printf("[WebRTC] Restarting encoding for channel %s -> %s (burnInSubtitles=%v, audioMode=%s, translation=%v)", channelID, newChannelID, burnInSubtitles, audioMode, translationEnabled)
 
 			if streamCtx != nil {
 				streamCtx.mu.Lock()
@@ -809,8 +842,8 @@ func handleWebRTCSignaling(c *gin.Context) {
 					sendRequestErrorSafe(peer.ID, msg.RequestID, "channel cannot be changed while other viewers are watching")
 					continue
 				}
-				if currentShared != nil && !currentShared.matchesSettings(burnInSubtitles, audioMode) && currentShared.peerCount() > 1 {
-					sendRequestErrorSafe(peer.ID, msg.RequestID, "audio settings cannot be changed while this channel has multiple viewers")
+				if currentShared != nil && !currentShared.matchesSettings(burnInSubtitles, audioMode, translationEnabled) && currentShared.peerCount() > 1 {
+					sendRequestErrorSafe(peer.ID, msg.RequestID, "audio/subtitle/translation settings cannot be changed while this channel has multiple viewers")
 					continue
 				}
 			}
@@ -827,7 +860,7 @@ func handleWebRTCSignaling(c *gin.Context) {
 				streamCtx.stop()
 				streamCtx = nil
 			}
-			if oldShared != nil && (oldChannelID != newChannelID || !oldShared.matchesSettings(burnInSubtitles, audioMode)) {
+			if oldShared != nil && (oldChannelID != newChannelID || !oldShared.matchesSettings(burnInSubtitles, audioMode, translationEnabled)) {
 				oldShared.stopIfIdle()
 			}
 
@@ -838,13 +871,14 @@ func handleWebRTCSignaling(c *gin.Context) {
 			// Create new streaming context with retry support
 			log.Printf("[WebRTC] restart-encoding: creating new streaming context")
 			streamCtx = &streamingContext{
-				channelID:       channelID,
-				burnInSubtitles: burnInSubtitles,
-				audioMode:       audioMode,
-				mirakurunURL:    mirakurunURL,
-				peer:            peer,
-				stopCh:          make(chan struct{}),
-				maxRetries:      5,
+				channelID:          channelID,
+				burnInSubtitles:    burnInSubtitles,
+				audioMode:          audioMode,
+				translationEnabled: translationEnabled,
+				mirakurunURL:       mirakurunURL,
+				peer:               peer,
+				stopCh:             make(chan struct{}),
+				maxRetries:         5,
 			}
 
 			// Start streaming with retry in a goroutine to prevent blocking WebSocket message loop
@@ -956,7 +990,7 @@ func StartWebRTCServiceStream(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "Invalid MPEG-TS program number"})
 		return
 	}
-	session, err := encoderInstance.StartNativeWebRTCEncoding(sessionID, stream, streamURL, []uint16{uint16(programNumber)}, false, encoder.AudioModeBoth)
+	session, err := encoderInstance.StartNativeWebRTCEncoding(sessionID, stream, streamURL, []uint16{uint16(programNumber)}, false, encoder.AudioModeBoth, false)
 	if err != nil {
 		if closeErr := stream.Close(); closeErr != nil {
 			log.Printf("[WebRTC] Failed to close rejected service stream: %v", closeErr)

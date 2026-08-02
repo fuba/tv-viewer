@@ -189,58 +189,94 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 
 .live-subtitle-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
 
-.translation-subtitle-layer {
+.translation-log-overlay {
   position: absolute;
-  inset: 0;
+  inset: 0 0 0 auto;
   z-index: 11;
-  overflow: hidden;
-  pointer-events: none;
-}
-
-.translation-subtitle-body {
-  position: absolute;
-  right: 4%;
-  bottom: 8%;
-  left: 4%;
   box-sizing: border-box;
-  width: fit-content;
-  max-width: 92%;
-  max-height: 38%;
-  margin-inline: auto;
+  display: flex;
+  flex-direction: column;
+  width: clamp(12rem, 32%, 26rem);
+  max-width: 52%;
   overflow: hidden;
-  padding: .28em .5em .34em;
-  background: rgb(0 0 0 / 78%);
+  background: rgb(0 0 0 / 55%);
   color: #fff;
-  font-family: 'WLMaru2004Emoji', 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
-  font-size: clamp(1.05rem, 3.1cqw, 3.4rem);
-  font-weight: 500;
-  line-height: 1.38;
-  letter-spacing: .015em;
-  text-align: center;
-  text-shadow: 0 .06em .12em #000;
+  pointer-events: auto;
 }
 
-.translation-credit {
-  display: block;
-  margin-bottom: .12em;
-  color: rgb(255 255 255 / 70%);
+.translation-log-header {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: .5rem;
+  min-height: 2rem;
+  padding: .35rem max(.5rem, env(safe-area-inset-right)) .35rem .6rem;
+  border-bottom: 1px solid rgb(255 255 255 / 12%);
+  background: rgb(0 0 0 / 24%);
   font-family: ui-sans-serif, system-ui, sans-serif;
-  font-size: .34em;
-  font-weight: 600;
-  letter-spacing: .04em;
-  line-height: 1.2;
-  text-align: left;
+}
+.translation-log-header > div { min-width: 0; }
+.translation-log-header strong { display: block; font-size: clamp(.7rem, .8cqw, .82rem); line-height: 1.2; }
+.translation-log-credit { display: block; overflow: hidden; color: rgb(255 255 255 / 56%); font-size: clamp(.55rem, .62cqw, .65rem); line-height: 1.25; text-overflow: ellipsis; white-space: nowrap; }
+.translation-log-status { display: inline-flex; flex: 0 0 auto; align-items: center; gap: .25rem; color: rgb(255 255 255 / 68%); font-size: clamp(.55rem, .62cqw, .65rem); }
+.translation-log-status.error { color: var(--danger); }
+.translation-log-status i { width: .35rem; height: .35rem; border-radius: 50%; background: #777; }
+.translation-log-status i.ready { background: #b8e6c2; }
+
+.translation-log-scroll {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: .3rem .45rem .75rem;
+  overscroll-behavior: contain;
+  scrollbar-color: rgb(255 255 255 / 24%) transparent;
+  scrollbar-width: thin;
+}
+.translation-log-empty { margin: 1rem .25rem; color: rgb(255 255 255 / 45%); font-size: clamp(.65rem, .75cqw, .78rem); line-height: 1.45; text-align: center; }
+.translation-log-entry { padding: .42rem .2rem .5rem; border-bottom: 1px solid rgb(255 255 255 / 9%); }
+.translation-log-entry time { display: block; margin-bottom: .12rem; color: rgb(255 255 255 / 43%); font: 500 clamp(.58rem, .64cqw, .68rem)/1.2 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.translation-log-entry p { margin: 0; font-family: 'WLMaru2004Emoji', 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif; line-break: strict; overflow-wrap: anywhere; }
+.translation-log-original { color: rgb(255 255 255 / 62%); font-size: clamp(.66rem, .82cqw, .8rem); line-height: 1.35; }
+.translation-log-text { margin-top: .12rem !important; color: #fff; font-size: clamp(.78rem, 1.02cqw, 1rem); font-weight: 500; line-height: 1.42; text-shadow: 0 1px 2px #000; }
+.translation-log-entry.draft { border-bottom: 0; opacity: .68; }
+.translation-log-entry.draft::before { display: block; margin-bottom: .15rem; color: rgb(255 255 255 / 45%); font: 600 clamp(.55rem, .62cqw, .64rem)/1.2 ui-sans-serif, system-ui, sans-serif; content: '翻訳中…'; }
+
+.translation-log-latest {
+  position: absolute;
+  right: max(.55rem, env(safe-area-inset-right));
+  bottom: .55rem;
+  z-index: 1;
+  padding: .3rem .55rem;
+  border: 1px solid rgb(255 255 255 / 24%);
+  border-radius: 999px;
+  background: rgb(0 0 0 / 82%);
+  color: #fff;
+  font-size: .66rem;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+}
+.translation-log-latest:hover { background: rgb(32 32 32 / 92%); }
+.translation-log-latest:focus-visible { outline: 1px solid #fff; outline-offset: 2px; }
+
+.player-shell:not(.controls-hidden) .translation-log-scroll {
+  padding-bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + .75rem);
+}
+.player-shell.volume-control-open .translation-log-scroll {
+  padding-bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + 4.75rem);
+}
+.player-shell:not(.controls-hidden) .translation-log-latest {
+  bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + .55rem);
+}
+.player-shell.volume-control-open .translation-log-latest {
+  bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + 4.55rem);
 }
 
-.translation-text {
-  display: -webkit-box;
-  overflow: hidden;
+.translation-log-original,
+.translation-log-text {
   line-break: strict;
   overflow-wrap: anywhere;
-  text-wrap: balance;
   white-space: normal;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 4;
 }
 
 .live-subtitle-body {
@@ -282,15 +318,10 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
    caption plane is lifted as a whole so the broadcast layout stays intact. */
 .player-shell:not(.controls-hidden) .live-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + .5rem); }
 .player-shell.volume-control-open .live-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + 4.5rem); }
-.player-shell:not(.controls-hidden) .translation-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + .6rem); }
-.player-shell.volume-control-open .translation-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + 4.6rem); }
 .player-shell:not(.controls-hidden) .caption-plane { transform: translateY(calc(-1 * (var(--bar-height) + env(safe-area-inset-bottom)))); }
 .player-shell.volume-control-open .caption-plane { transform: translateY(calc(-1 * (var(--bar-height) + env(safe-area-inset-bottom) + 4rem))); }
 
 @media (orientation: landscape) and (max-height: 500px) {
-  .translation-subtitle-body {
-    max-height: 46%;
-    font-size: clamp(.9rem, 4.8cqh, 1.6rem);
-  }
-  .translation-text { -webkit-line-clamp: 3; }
+  .translation-log-overlay { width: min(36%, 22rem); max-width: 46%; }
+  .translation-log-header { min-height: 1.7rem; padding-block: .25rem; }
 }

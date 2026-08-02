@@ -30,40 +30,51 @@ func TestTranslationMessageDoesNotForwardSynthesizedAudio(t *testing.T) {
 	message := translationMessage(voicetranslate.Event{
 		Type: voicetranslate.EventFinal, CaptionID: "caption-1", Text: "Hello world.",
 		Translation: &translation, TargetLanguage: "ja", AudioBase64: "must-not-leave-the-server",
-	})
-	if message["type"] != "translation-caption" || message["phase"] != "final" || message["text"] != translation {
+	}, "channel-1", "stream-1")
+	if message["type"] != "translation-caption" || message["phase"] != "final" || message["text"] != translation || message["originalText"] != "Hello world." {
 		t.Fatalf("translation message = %v", message)
 	}
 	if _, exists := message["audio_base64"]; exists {
 		t.Fatalf("synthesized audio leaked into DataChannel: %v", message)
 	}
+	if message["channelId"] != "channel-1" || message["streamId"] != "stream-1" {
+		t.Fatalf("translation source identity = %v", message)
+	}
 }
 
 func TestTranslationStatusMessageCarriesSafeState(t *testing.T) {
-	message := translationMessage(voicetranslate.Event{Type: voicetranslate.EventError, Stage: "capacity", Message: "busy"})
-	if message["type"] != "translation-status" || message["status"] != "error" || message["stage"] != "capacity" {
+	secret := strings.Repeat("s", 32)
+	message := translationMessage(voicetranslate.Event{Type: voicetranslate.EventError, Stage: "capacity", Message: "token=" + secret}, "channel-1", "stream-1")
+	if message["type"] != "translation-status" || message["status"] != "error" || message["stage"] != "capacity" || message["message"] != "Translation service is busy" {
 		t.Fatalf("translation status = %v", message)
+	}
+	if strings.Contains(message["message"].(string), secret) {
+		t.Fatalf("upstream error leaked into DataChannel: %v", message)
 	}
 }
 
 func TestTranslationMessageBoundsAllForwardedGatewayMetadata(t *testing.T) {
 	translation := strings.Repeat("訳", 500)
+	original := strings.Repeat("o", 500)
 	message := translationMessage(voicetranslate.Event{
-		Type: voicetranslate.EventFinal, CaptionID: strings.Repeat("c", 300), Translation: &translation,
+		Type: voicetranslate.EventFinal, CaptionID: strings.Repeat("c", 300), Text: original, Translation: &translation,
 		SourceLanguage: strings.Repeat("s", 50), TargetLanguage: strings.Repeat("t", 50),
-	})
-	if len([]rune(message["text"].(string))) != 400 || len(message["captionId"].(string)) != 256 {
+	}, strings.Repeat("h", 300), strings.Repeat("i", 300))
+	if len([]rune(message["text"].(string))) != 400 || len(message["originalText"].(string)) != 400 || len(message["captionId"].(string)) != 256 {
 		t.Fatalf("translation fields were not bounded: %v", message)
 	}
 	if len(message["sourceLanguage"].(string)) != 32 || len(message["targetLanguage"].(string)) != 32 {
 		t.Fatalf("language fields were not bounded: %v", message)
 	}
+	if len(message["channelId"].(string)) != 256 || len(message["streamId"].(string)) != 256 {
+		t.Fatalf("translation source identity was not bounded: %v", message)
+	}
 
 	status := translationMessage(voicetranslate.Event{
 		Type: voicetranslate.EventError, CaptionID: strings.Repeat("c", 300),
 		Stage: strings.Repeat("s", 100), Message: strings.Repeat("m", 600),
-	})
-	if len(status["captionId"].(string)) != 256 || len(status["stage"].(string)) != 64 || len(status["message"].(string)) != 512 {
+	}, "channel-1", "stream-1")
+	if len(status["captionId"].(string)) != 256 || status["stage"] != "service" || status["message"] != "Translation service error" {
 		t.Fatalf("status fields were not bounded: %v", status)
 	}
 }

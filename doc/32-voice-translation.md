@@ -1,6 +1,6 @@
 # VoiceTranslate live translation
 
-TV Viewer can send the selected broadcast audio to VoiceTranslate and replace both the on-screen caption and WebRTC audio with Japanese translation. The player bar exposes an independent `翻訳 入/切` toggle.
+TV Viewer can send the selected broadcast audio to VoiceTranslate, show a Japanese translation log over the picture, and replace WebRTC audio with translated speech. The player bar exposes an independent `翻訳 入/切` toggle.
 
 ## Data flow
 
@@ -9,13 +9,13 @@ Mirakurun MPEG-TS
   -> native AAC decoder (48 kHz PCM)
      +-> FIR downmix/resample (16 kHz mono, 100 ms frames)
      |   -> configured VoiceTranslate WSS endpoint
-     |      -> partial/final translation -> WebRTC DataChannel -> bounded caption overlay
+     |      -> partial/final source and translation -> WebRTC DataChannel -> bounded chat overlay
      |      -> VOICEVOX WAV -> validate/decode/resample -> Opus
      +-> original Opus until VoiceTranslate is ready or after a connection failure
          translated Opus/silence while translation is active
 ```
 
-The shared access token is read only by the backend. It is never included in browser JavaScript, a URL, logs, or DataChannel messages. The backend validates the WSS URL, Origin, token length, ready contract, input frame size, event size, Base64, RIFF/WAVE structure, PCM format, the 4 MiB WAV limit, and an eight-second decoded-speech limit.
+The shared access token is read only by the backend. It is never included in browser JavaScript, a URL, logs, or DataChannel messages. The backend validates the WSS URL, Origin, token length, ready contract, input frame size, event size, Base64, RIFF/WAVE structure, PCM format, the 4 MiB WAV limit, and an eight-second decoded-speech limit. Upstream error text is replaced with allow-listed stages and fixed public messages before it reaches the browser.
 
 Only WebRTC signaling connections with a non-empty browser `Origin` that matches `ALLOWED_ORIGINS` may enable translation. Keep the backend bound behind the trusted reverse proxy or private network as well: an Origin check is a browser boundary, not user authentication, because a custom non-browser client can forge the header.
 
@@ -65,8 +65,11 @@ For a backend process run directly on the host, set `VOICETRANSLATE_TOKEN_FILE` 
 ## Runtime behavior
 
 - VoiceTranslate receives 16 kHz, mono, signed PCM16 little-endian in 3,200-byte frames paced every 100 ms.
-- Interim translations overwrite one live caption. Final translations remain for eight seconds unless a newer event replaces them.
-- The overlay is limited to 92% of picture width and 38% of picture height, uses strict Japanese line breaking, breaks unspaced strings, and clamps to four lines (three on short landscape screens). It moves above the player bar and volume popover.
+- Interim translations overwrite one draft at the bottom of the log. Each final translation appends its source text, Japanese translation, and browser receipt time.
+- The right-side translucent overlay is drawn inside the video frame without resizing the picture. It follows the newest entry until the viewer scrolls up, then offers a `最新へ` button instead of stealing the scroll position.
+- Final entries are retained in memory per channel for one hour, including across translation off/on cycles. They are not persisted across a page reload. Defensive limits allow 2,000 entries per channel, 4,000 entries total, and 16 recent channels.
+- Every translation event carries its backend channel and stream identity. The browser rejects delayed events from retired streams so a channel change cannot mix two histories.
+- ARIB captions remain independently controlled by the existing subtitle toggle and may be shown with the translation log.
 - While translation is ready, original audio is replaced with synthesized audio or silence on the same 48 kHz stereo WebRTC timeline. If WSS setup fails or disconnects, TV Viewer immediately falls back to broadcast audio.
 - The current VoiceTranslate service synthesizes speech only for Japanese output and uses Zundamon. The UI displays `VOICEVOX:ずんだもん` credit with translated captions.
 - The upstream default allows one processing session. Capacity failure is reported in the player and does not expose the token.

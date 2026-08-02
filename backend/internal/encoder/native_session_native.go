@@ -38,14 +38,15 @@ func (e *Encoder) StartNativeWebRTCEncoding(channelID string, input io.ReadClose
 	videoReader, videoWriter := io.Pipe()
 	audioReader, audioWriter := io.Pipe()
 	subtitleReader, subtitleWriter := newSubtitlePipe(subtitlesEnabled || translationEnabled)
+	sessionID := channelID + "-native-" + time.Now().Format("150405.000")
 	session := &WebRTCSession{
-		ID: channelID + "-native-" + time.Now().Format("150405.000"), ChannelID: channelID,
+		ID: sessionID, ChannelID: channelID,
 		ctx: ctx, cancel: cancel, stream: input, VideoPipe: videoReader, AudioPipe: audioReader,
 		VideoRaw: true, AudioRaw: true, SubtitlePipe: subtitleReader, SubtitleRaw: subtitlesEnabled || translationEnabled,
 		AudioMode: audioMode, TranslationEnabled: translationEnabled, StreamURL: streamURL,
 	}
 	go func() {
-		err := runNativePipeline(ctx, channelID, input, videoWriter, audioWriter, subtitleWriter, programNumbers, subtitlesEnabled, audioMode, translationConfig)
+		err := runNativePipeline(ctx, channelID, sessionID, input, videoWriter, audioWriter, subtitleWriter, programNumbers, subtitlesEnabled, audioMode, translationConfig)
 		_ = videoWriter.CloseWithError(err)
 		_ = audioWriter.CloseWithError(err)
 		if subtitleWriter != nil {
@@ -66,7 +67,7 @@ func newSubtitlePipe(enabled bool) (io.ReadCloser, *io.PipeWriter) {
 	return reader, writer
 }
 
-func runNativePipeline(ctx context.Context, channelID string, input io.Reader, videoOut, audioOut, subtitleOut *io.PipeWriter, programNumbers []uint16, subtitlesEnabled bool, audioMode AudioMode, translationConfig *voicetranslate.Config) error {
+func runNativePipeline(ctx context.Context, channelID, streamID string, input io.Reader, videoOut, audioOut, subtitleOut *io.PipeWriter, programNumbers []uint16, subtitlesEnabled bool, audioMode AudioMode, translationConfig *voicetranslate.Config) error {
 	decoder, err := nativevideo.NewAdaptiveDecoder()
 	if err != nil {
 		return err
@@ -100,7 +101,7 @@ func runNativePipeline(ctx context.Context, channelID string, input io.Reader, v
 	var translator *voicetranslate.Runtime
 	if translationConfig != nil {
 		translator = voicetranslate.StartRuntime(ctx, *translationConfig, func(event voicetranslate.Event) {
-			if err := dataChannel.WriteJSON(translationMessage(event)); err != nil && ctx.Err() == nil {
+			if err := dataChannel.WriteJSON(translationMessage(event, channelID, streamID)); err != nil && ctx.Err() == nil {
 				log.Printf("[VoiceTranslate] Failed to publish event: %v", err)
 			}
 		})

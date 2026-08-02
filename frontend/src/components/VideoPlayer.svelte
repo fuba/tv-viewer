@@ -8,15 +8,21 @@
   import { normalizedVolume } from '../lib/audioVolume'
   import { broadcastDisplayAspect, displayAspectRatio, type VideoFormatMessage } from '../lib/videoFormat'
   import {
-    translationCaptionState,
+    clearTranslationDraft,
+    emptyTranslationHistories,
+    emptyTranslationLog,
+    pruneTranslationHistories,
+    translationHistoryState,
+    translationMessageRoute,
     translationStatusAfterRestart,
-    translationStatusClearsCaption,
-    type TranslationCaptionState,
+    translationStatusClearsDraft,
+    type TranslationHistories,
+    type TranslationLogState,
     type TranslationUIStatus,
-  } from '../lib/translationCaption'
+  } from '../lib/translationLog'
   import TunerStatus from './TunerStatus.svelte'
   import SubtitleRenderer from './SubtitleRenderer.svelte'
-  import TranslationSubtitleRenderer from './TranslationSubtitleRenderer.svelte'
+  import TranslationLogOverlay from './TranslationLogOverlay.svelte'
 
   const dispatch = createEventDispatcher()
 
@@ -57,12 +63,19 @@
   // 'both' = stereo, 'main' = left channel, 'sub' = right channel
   let audioMode: AudioMode = 'both'
 
-  // VoiceTranslate replaces both the broadcast captions and the WebRTC audio.
+  // VoiceTranslate replaces broadcast audio and renders a separate translation log.
   let translationEnabled = false
   let translationStatus: TranslationUIStatus = 'off'
-  let translationCaption: TranslationCaptionState | null = null
-  let translationTimer: ReturnType<typeof setTimeout> | null = null
+  let translationHistories: TranslationHistories = emptyTranslationHistories()
+  let translationChannelId = ''
+  let activeTranslationLog: TranslationLogState = emptyTranslationLog()
+  let activeTranslationStreamId = ''
+  const retiredTranslationStreamIds = new Set<string>()
+  let translationPruneTimer: ReturnType<typeof setInterval> | null = null
   let lastTranslationErrorAt = 0
+
+  $: translationChannelId = channelSelectionId(currentChannel || selectedChannel)
+  $: activeTranslationLog = translationHistories[translationChannelId] ?? emptyTranslationLog()
 
   let activeSubtitles: Record<string, SubtitleMessage> = {}
   let activeCaptions: SubtitleMessage[] = []
@@ -94,6 +107,7 @@
     previousTranslationEnabled: boolean
     requestedTranslationEnabled: boolean
     previousTranslationStatus: TranslationUIStatus
+    previousTranslationStreamId: string
   } | null = null
 
   const maximumRecoveryAttempts = 5
@@ -217,15 +231,19 @@
     revealControls()
   }
 
-  function eventIsInsideToolbar(event: PointerEvent) {
-    return event.target instanceof Element && Boolean(event.target.closest('.player-bar'))
+  function elementIsInsidePlayerUI(element: Element) {
+    return Boolean(element.closest('.player-bar, .translation-log-overlay'))
+  }
+
+  function eventIsInsidePlayerUI(event: PointerEvent) {
+    return event.target instanceof Element && elementIsInsidePlayerUI(event.target)
   }
 
   function handlePlayerPointerDown(event: PointerEvent) {
     if (!event.isPrimary || playerGesture) return
-    // Never capture a gesture that starts on the bar: capturing retargets the
-    // follow-up click to the shell and the bar buttons would stop responding.
-    if (eventIsInsideToolbar(event)) return
+    // Never capture a gesture that starts on interactive player UI: capturing
+    // retargets the follow-up click and would break buttons and log scrolling.
+    if (eventIsInsidePlayerUI(event)) return
     playerGesture = { pointerId: event.pointerId }
     try {
       playerShell.setPointerCapture(event.pointerId)
@@ -238,10 +256,10 @@
     if (!playerGesture || playerGesture.pointerId !== event.pointerId) return
     const endElement = document.elementFromPoint(event.clientX, event.clientY)
     const endedInsidePlayer = endElement instanceof Element && playerShell.contains(endElement)
-    const endedInsideToolbar = endElement instanceof Element && Boolean(endElement.closest('.player-bar'))
+    const endedInsidePlayerUI = endElement instanceof Element && elementIsInsidePlayerUI(endElement)
     cancelPlayerGesture(event)
-    // Both press and release must happen on the picture, never on the bar.
-    if (!endedInsidePlayer || endedInsideToolbar) return
+    // Both press and release must happen on the picture, never on player UI.
+    if (!endedInsidePlayer || endedInsidePlayerUI) return
     enableAudioFromUserGesture()
     toggleControls()
   }
@@ -411,6 +429,9 @@
     window.addEventListener('blur', cancelPlayerGesture)
     window.visualViewport?.addEventListener('resize', updateFrameSize)
     orientationController()?.addEventListener?.('change', scheduleViewportSettle)
+    translationPruneTimer = setInterval(() => {
+      translationHistories = pruneTranslationHistories(translationHistories, Date.now())
+    }, 60_000)
     updateFrameSize()
     revealControls()
   })
@@ -422,40 +443,76 @@
     activeCaptions = []
   }
 
-  function clearTranslationCaption() {
-    if (translationTimer) clearTimeout(translationTimer)
-    translationTimer = null
-    translationCaption = null
+  function clearCurrentTranslationDraft() {
+    translationHistories = clearTranslationDraft(translationHistories, translationChannelId)
+  }
+
+  function requestedTranslationEnabled(): boolean {
+    return pendingRestart?.requestedTranslationEnabled ?? translationEnabled
+  }
+
+  function translationMessageChannelId(): string {
+    return channelSelectionId(pendingRestart?.requestedChannel || currentChannel || selectedChannel)
+  }
+
+  function retireActiveTranslationStream(): string {
+    const previous = activeTranslationStreamId
+    if (previous) {
+      retiredTranslationStreamIds.add(previous)
+      while (retiredTranslationStreamIds.size > 32) {
+        const oldest = retiredTranslationStreamIds.values().next().value
+        if (!oldest) break
+        retiredTranslationStreamIds.delete(oldest)
+      }
+    }
+    activeTranslationStreamId = ''
+    return previous
   }
 
   function handleTranslation(message: TranslationMessage) {
+    if (!requestedTranslationEnabled()) return
+    const route = translationMessageRoute(
+      message,
+      translationMessageChannelId(),
+      activeTranslationStreamId,
+      retiredTranslationStreamIds,
+    )
+    if (!route) return
     if (message.type === 'translation-status') {
-      if (!translationEnabled && translationStatus !== 'connecting') return
       if (message.status === 'ready') {
+        if (route.establishesStream) {
+          activeTranslationStreamId = route.streamId
+          translationHistories = clearTranslationDraft(translationHistories, route.channelId)
+        }
         translationStatus = 'ready'
         lastTranslationErrorAt = 0
         addLog('VoiceTranslate is ready', 'success')
       } else if (message.status === 'error') {
         translationStatus = 'error'
-        const errorText = `VoiceTranslate ${message.stage || 'error'}: ${message.message || 'translation failed'}`
+        const errorText = translationErrorText(message.stage)
         const now = Date.now()
         if (now - lastTranslationErrorAt >= 10_000) {
           lastTranslationErrorAt = now
           addLog(errorText, 'error')
         }
       }
-      if (translationStatusClearsCaption(message.status)) clearTranslationCaption()
+      if (translationStatusClearsDraft(message.status)) {
+        translationHistories = clearTranslationDraft(translationHistories, route.channelId)
+      }
       return
     }
-    if (!translationEnabled && translationStatus !== 'connecting') return
-    const caption = translationCaptionState(message, Date.now())
-    if (!caption) return
-    translationCaption = caption
-    if (translationTimer) clearTimeout(translationTimer)
-    translationTimer = setTimeout(() => {
-      translationTimer = null
-      if (translationCaption?.expiresAt === caption.expiresAt) translationCaption = null
-    }, Math.max(0, caption.expiresAt - Date.now()))
+    translationHistories = translationHistoryState(translationHistories, route.channelId, message, Date.now())
+  }
+
+  function translationErrorText(stage?: string): string {
+    switch (stage) {
+      case 'capacity': return 'VoiceTranslate capacity: Translation service is busy'
+      case 'authentication': return 'VoiceTranslate authentication: Translation authentication failed'
+      case 'connection': return 'VoiceTranslate connection: Translation service connection failed'
+      case 'translation': return 'VoiceTranslate translation: Translation failed'
+      case 'speech': return 'VoiceTranslate speech: Translated speech failed'
+      default: return 'VoiceTranslate service: Translation service error'
+    }
   }
 
   function updateSubtitleText() {
@@ -505,8 +562,9 @@
 
   function toggleTranslation() {
     const requestedTranslationEnabled = !translationEnabled
+    const previousTranslationStreamId = retireActiveTranslationStream()
     addLog(`Translation: ${requestedTranslationEnabled ? 'ON' : 'OFF'}`)
-    if (!requestedTranslationEnabled) clearTranslationCaption()
+    if (!requestedTranslationEnabled) clearCurrentTranslationDraft()
     if (rtcClient && streamStarted) {
       beginStartAttempt()
       const previousTranslationStatus = translationStatus
@@ -521,6 +579,7 @@
         previousTranslationEnabled: translationEnabled,
         requestedTranslationEnabled,
         previousTranslationStatus,
+        previousTranslationStreamId,
       }
     } else {
       translationEnabled = requestedTranslationEnabled
@@ -538,6 +597,7 @@
     if (rtcClient && streamStarted) {
       beginStartAttempt()
       const previousTranslationStatus = translationStatus
+      const previousTranslationStreamId = translationEnabled ? retireActiveTranslationStream() : ''
       if (translationEnabled) translationStatus = 'connecting'
       const requestId = rtcClient.setAudioMode(requestedAudioMode)
       pendingRestart = {
@@ -549,6 +609,7 @@
         previousTranslationEnabled: translationEnabled,
         requestedTranslationEnabled: translationEnabled,
         previousTranslationStatus,
+        previousTranslationStreamId,
       }
     } else {
       audioMode = requestedAudioMode
@@ -649,6 +710,7 @@
       addLog(`Switching channel from ${currentChannel.channel} to ${channelId} using restart-encoding`)
       clearSubtitles()
       const previousTranslationStatus = translationStatus
+      const previousTranslationStreamId = translationEnabled ? retireActiveTranslationStream() : ''
       if (translationEnabled) translationStatus = 'connecting'
       const requestId = rtcClient.restartEncoding({ channelId, burnInSubtitles: true, audioMode, translationEnabled })
       pendingRestart = {
@@ -660,9 +722,12 @@
         previousTranslationEnabled: translationEnabled,
         requestedTranslationEnabled: translationEnabled,
         previousTranslationStatus,
+        previousTranslationStreamId,
       }
       return
     }
+
+    if (translationEnabled) retireActiveTranslationStream()
 
     // Increment only when replacing the RTCClient so its callbacks remain valid across restarts.
     streamSequence++
@@ -760,11 +825,14 @@
           if (thisStreamSequence !== streamSequence || destroyed) return
           addLog(`WebRTC error: ${error.message}`, 'error')
           if (requestId && pendingRestart?.requestId === requestId) {
+            retireActiveTranslationStream()
             selectedChannel = pendingRestart.previousChannel
             currentChannel = pendingRestart.previousChannel
             audioMode = pendingRestart.previousAudioMode
             translationEnabled = pendingRestart.previousTranslationEnabled
             translationStatus = pendingRestart.previousTranslationStatus
+            activeTranslationStreamId = pendingRestart.previousTranslationStreamId
+            retiredTranslationStreamIds.delete(activeTranslationStreamId)
             pendingRestart = null
           }
           settleStartAttempt()
@@ -777,7 +845,7 @@
             audioMode = pendingRestart.requestedAudioMode
             translationEnabled = pendingRestart.requestedTranslationEnabled
             translationStatus = translationStatusAfterRestart(translationStatus, translationEnabled)
-            if (!translationEnabled) clearTranslationCaption()
+            if (!translationEnabled) clearCurrentTranslationDraft()
             pendingRestart = null
           }
           addLog(`Encoding restarted for channel ${newChannelId}`, 'success')
@@ -841,7 +909,7 @@
     orientationLockCoordinator?.destroy()
     orientationLockCoordinator = null
     clearSubtitles()
-    clearTranslationCaption()
+    if (translationPruneTimer) clearInterval(translationPruneTimer)
     clearStartWatchdog()
     if (pipelineLogTimer) clearTimeout(pipelineLogTimer)
     if (rtcClient) {
@@ -922,12 +990,12 @@
         >
         </video>
 
-        {#if burnInSubtitles && !translationEnabled && activeCaptions.length}
+        {#if burnInSubtitles && activeCaptions.length}
           <SubtitleRenderer captions={activeCaptions} />
         {/if}
 
-        {#if translationEnabled && translationCaption}
-          <TranslationSubtitleRenderer caption={translationCaption} />
+        {#if translationEnabled}
+          <TranslationLogOverlay channelId={translationChannelId} log={activeTranslationLog} status={translationStatus} />
         {/if}
 
         {#if isStartingStream}

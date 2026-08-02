@@ -1,4 +1,5 @@
 import type { SignalingMessage, SubtitleMessage, TranslationMessage, ConnectionStatus, RTCClientOptions, AudioMode, VideoFormatMessage } from './types';
+import { validatedTranslationMessage } from './translationMessage';
 
 export class RTCClient {
   private pc: RTCPeerConnection | null = null;
@@ -22,6 +23,7 @@ export class RTCClient {
   private onError?: (error: Error, requestId?: string) => void;
   private onLog?: (message: string) => void;
   private pendingRestarts = new Map<string, { channelId: string; burnInSubtitles: boolean; audioMode: AudioMode; translationEnabled: boolean }>();
+  private lastInvalidDataChannelLogAt = 0;
 
   constructor(options: RTCClientOptions) {
     this.channelId = options.channelId;
@@ -214,17 +216,26 @@ export class RTCClient {
             return;
           }
           if (message?.type === 'translation-caption' || message?.type === 'translation-status') {
-            this.onTranslation?.(message as TranslationMessage);
+            const translation = validatedTranslationMessage(message);
+            if (translation) {
+              this.onTranslation?.(translation);
+            } else this.logInvalidDataChannelMessage();
             return;
           }
           this.onSubtitle?.(message as SubtitleMessage);
-        } catch (e) {
-          this.log(`Failed to parse data channel message: ${e}`);
+        } catch {
+          this.logInvalidDataChannelMessage();
         }
       };
     };
 
     this.log('PeerConnection created');
+  }
+
+  private logInvalidDataChannelMessage(): void {
+    if (Date.now() - this.lastInvalidDataChannelLogAt < 10_000) return;
+    this.lastInvalidDataChannelLogAt = Date.now();
+    this.log('Dropped invalid data channel message');
   }
 
   private async handleWebSocketMessage(data: string): Promise<void> {

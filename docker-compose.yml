@@ -9,7 +9,7 @@ services:
     environment:
       - PORT=18088
       - BIND_ADDRESS=127.0.0.1
-      - ALLOWED_ORIGINS=https://tv.home.fuba.dev,http://puma2:18090,http://puma2:18089,http://localhost:18090,http://localhost:18089,http://127.0.0.1:18090,http://127.0.0.1:18089
+      - ALLOWED_ORIGINS=${ALLOWED_ORIGINS:?Set ALLOWED_ORIGINS in the deployment environment}
       - GIN_MODE=release
       - MIRAKURUN_URL=http://tuner:40772
       - PROGRAM_API_URL=http://puma2:40870

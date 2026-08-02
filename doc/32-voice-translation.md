@@ -8,7 +8,7 @@ TV Viewer can send the selected broadcast audio to VoiceTranslate and replace bo
 Mirakurun MPEG-TS
   -> native AAC decoder (48 kHz PCM)
      +-> FIR downmix/resample (16 kHz mono, 100 ms frames)
-     |   -> wss://honyaku.home.fuba.dev/ws
+     |   -> configured VoiceTranslate WSS endpoint
      |      -> partial/final translation -> WebRTC DataChannel -> bounded caption overlay
      |      -> VOICEVOX WAV -> validate/decode/resample -> Opus
      +-> original Opus until VoiceTranslate is ready or after a connection failure
@@ -49,7 +49,7 @@ For containerized development:
 docker compose -f docker-compose.dev.yml -f compose.translation.yml up -d --build
 ```
 
-The override mounts the token at `/run/secrets/voicetranslate-access-token`; it does not copy the token into an image or environment value. `VOICETRANSLATE_URL` and `VOICETRANSLATE_ORIGIN` default to the production VoiceTranslate endpoint and can be changed for a local test gateway.
+The override mounts the token at `/run/secrets/voicetranslate-access-token`; it does not copy the token into an image or environment value. Set `VOICETRANSLATE_URL`, `VOICETRANSLATE_ORIGIN`, and any private browser hostname in `ALLOWED_ORIGINS` only in the untracked deployment `.env`. The repository intentionally has no private deployment-domain defaults.
 
 The production backend runs as UID `10001` (development Compose uses the invoking UID/GID). Before starting the long-running service, verify that production Compose presents the secret as readable without printing it:
 
@@ -77,10 +77,10 @@ VoiceTranslate finalizes an utterance after silence or a four-second split, then
 
 ## Verification
 
-The unauthenticated production liveness endpoint was verified on 2026-08-03:
+Verify the configured service's unauthenticated liveness endpoint before deployment:
 
 ```sh
-curl -fsS https://honyaku.home.fuba.dev/healthz
+curl -fsS "${VOICETRANSLATE_ORIGIN}/healthz"
 # {"status":"ok"}
 ```
 

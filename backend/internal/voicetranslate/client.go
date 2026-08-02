@@ -17,8 +17,6 @@ import (
 )
 
 const (
-	defaultURL           = "wss://honyaku.home.fuba.dev/ws"
-	defaultOrigin        = "https://honyaku.home.fuba.dev"
 	maxEventSize         = 6 << 20
 	maxAudioFrameSize    = 65536
 	writeTimeout         = 5 * time.Second
@@ -65,10 +63,10 @@ func ConfigFromEnv() (Config, error) {
 		SpeechEnabled:  true,
 	}
 	if config.URL == "" {
-		config.URL = defaultURL
+		return Config{}, errors.New("VOICETRANSLATE_URL is required")
 	}
 	if config.Origin == "" {
-		config.Origin = defaultOrigin
+		return Config{}, errors.New("VOICETRANSLATE_ORIGIN is required")
 	}
 	if tokenFile := strings.TrimSpace(os.Getenv("VOICETRANSLATE_TOKEN_FILE")); tokenFile != "" {
 		if config.AccessToken != "" {

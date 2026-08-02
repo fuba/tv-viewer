@@ -10,7 +10,7 @@ import (
 )
 
 func TestWebSocketOriginAllowed(t *testing.T) {
-	t.Setenv("ALLOWED_ORIGINS", "https://tv.home.fuba.dev,http://puma2:18089,http://puma2:18090,https://tv.example.test")
+	t.Setenv("ALLOWED_ORIGINS", "https://viewer.example.test,http://puma2:18089,http://puma2:18090,https://tv.example.test")
 
 	tests := []struct {
 		name   string
@@ -23,13 +23,13 @@ func TestWebSocketOriginAllowed(t *testing.T) {
 		{name: "same origin through proxy", host: "puma2:18090", origin: "http://puma2:18090", want: true},
 		{name: "different port", host: "puma2:18089", origin: "http://puma2:5173", want: false},
 		{name: "configured origin", host: "puma2", origin: "https://tv.example.test", want: true},
-		{name: "production HTTPS origin", host: "tv.home.fuba.dev", origin: "https://tv.home.fuba.dev", want: true},
-		{name: "hostname suffix", host: "tv.home.fuba.dev", origin: "https://tv.home.fuba.dev.attacker.example", want: false},
-		{name: "different HTTPS port", host: "tv.home.fuba.dev", origin: "https://tv.home.fuba.dev:444", want: false},
-		{name: "userinfo", host: "tv.home.fuba.dev", origin: "https://user@tv.home.fuba.dev", want: false},
-		{name: "path", host: "tv.home.fuba.dev", origin: "https://tv.home.fuba.dev/path", want: false},
-		{name: "query", host: "tv.home.fuba.dev", origin: "https://tv.home.fuba.dev?x=1", want: false},
-		{name: "fragment", host: "tv.home.fuba.dev", origin: "https://tv.home.fuba.dev#x", want: false},
+		{name: "production HTTPS origin", host: "viewer.example.test", origin: "https://viewer.example.test", want: true},
+		{name: "hostname suffix", host: "viewer.example.test", origin: "https://viewer.example.test.attacker.example", want: false},
+		{name: "different HTTPS port", host: "viewer.example.test", origin: "https://viewer.example.test:444", want: false},
+		{name: "userinfo", host: "viewer.example.test", origin: "https://user@viewer.example.test", want: false},
+		{name: "path", host: "viewer.example.test", origin: "https://viewer.example.test/path", want: false},
+		{name: "query", host: "viewer.example.test", origin: "https://viewer.example.test?x=1", want: false},
+		{name: "fragment", host: "viewer.example.test", origin: "https://viewer.example.test#x", want: false},
 		{name: "foreign origin", host: "puma2", origin: "https://attacker.example", want: false},
 		{name: "malformed origin", host: "puma2", origin: "://bad", want: false},
 	}
@@ -86,19 +86,19 @@ func TestWebSocketOriginFailsClosedWithoutAllowlist(t *testing.T) {
 }
 
 func TestTranslationRequestRequiresAllowedBrowserOrigin(t *testing.T) {
-	t.Setenv("ALLOWED_ORIGINS", "https://tv.home.fuba.dev")
+	t.Setenv("ALLOWED_ORIGINS", "https://viewer.example.test")
 	tests := []struct {
 		name   string
 		origin string
 		want   bool
 	}{
 		{name: "missing origin", want: false},
-		{name: "allowed origin", origin: "https://tv.home.fuba.dev", want: true},
+		{name: "allowed origin", origin: "https://viewer.example.test", want: true},
 		{name: "foreign origin", origin: "https://attacker.example", want: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			req := httptest.NewRequest("GET", "https://tv.home.fuba.dev/api/ws/webrtc/GR_1", nil)
+			req := httptest.NewRequest("GET", "https://viewer.example.test/api/ws/webrtc/GR_1", nil)
 			req.Header.Set("Origin", tt.origin)
 			if got := translationRequestAllowed(req); got != tt.want {
 				t.Fatalf("translationRequestAllowed() = %v, want %v", got, tt.want)

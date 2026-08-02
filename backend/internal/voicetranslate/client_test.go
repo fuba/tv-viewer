@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -104,6 +105,38 @@ func TestClientAuthenticatesStreamsPCMAndReceivesEvents(t *testing.T) {
 	}
 }
 
+func TestLiveVoiceTranslateConnection(t *testing.T) {
+	if os.Getenv("VOICETRANSLATE_INTEGRATION") != "1" {
+		t.Skip("set VOICETRANSLATE_INTEGRATION=1 to test the configured service")
+	}
+	config, err := ConfigFromEnv()
+	if err != nil {
+		t.Fatalf("ConfigFromEnv: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	events := make(chan Event, 2)
+	result := make(chan error, 1)
+	go func() { result <- NewClient(config).Run(ctx, make(chan []byte), events) }()
+
+	select {
+	case event := <-events:
+		if event.Type != EventReady {
+			t.Fatalf("first live event = %q, want %q", event.Type, EventReady)
+		}
+		cancel()
+	case err := <-result:
+		t.Fatalf("live VoiceTranslate connection failed before ready: %v", err)
+	case <-ctx.Done():
+		t.Fatalf("live VoiceTranslate ready timeout: %v", ctx.Err())
+	}
+	select {
+	case <-result:
+	case <-time.After(2 * time.Second):
+		t.Fatal("live VoiceTranslate client did not stop after cancellation")
+	}
+}
+
 func TestConfigRejectsInsecureRemoteWebSocket(t *testing.T) {
 	t.Parallel()
 	config := Config{
@@ -112,6 +145,21 @@ func TestConfigRejectsInsecureRemoteWebSocket(t *testing.T) {
 	}
 	if err := config.Validate(); err == nil {
 		t.Fatal("expected an insecure remote WebSocket URL to be rejected")
+	}
+}
+
+func TestConfigFromEnvRequiresExplicitEndpointAndOrigin(t *testing.T) {
+	t.Setenv("VOICETRANSLATE_URL", "")
+	t.Setenv("VOICETRANSLATE_ORIGIN", "")
+	t.Setenv("VOICETRANSLATE_ACCESS_TOKEN", strings.Repeat("a", 32))
+	t.Setenv("VOICETRANSLATE_TOKEN_FILE", "")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "VOICETRANSLATE_URL") {
+		t.Fatalf("ConfigFromEnv() error = %v, want required URL error", err)
+	}
+
+	t.Setenv("VOICETRANSLATE_URL", "wss://translate.example.test/ws")
+	if _, err := ConfigFromEnv(); err == nil || !strings.Contains(err.Error(), "VOICETRANSLATE_ORIGIN") {
+		t.Fatalf("ConfigFromEnv() error = %v, want required Origin error", err)
 	}
 }
 

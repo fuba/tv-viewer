@@ -224,7 +224,7 @@ func (c *Client) Run(ctx context.Context, audio <-chan []byte, events chan<- Eve
 		return fmt.Errorf("validate VoiceTranslate ready event: %w", err)
 	}
 	if ready.Type != EventReady || ready.SampleRate != 16000 || ready.Channels != 1 || ready.Format != "pcm_s16le" {
-		return fmt.Errorf("unexpected VoiceTranslate ready event: type=%q rate=%d channels=%d format=%q", ready.Type, ready.SampleRate, ready.Channels, ready.Format)
+		return errors.New("VoiceTranslate sent an invalid ready contract")
 	}
 	if err := sendEvent(ctx, events, ready); err != nil {
 		return err

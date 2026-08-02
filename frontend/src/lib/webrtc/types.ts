@@ -59,8 +59,11 @@ export interface TranslationCaptionMessage {
   id?: string;
   captionId?: string;
   text: string;
+  originalText?: string;
   sourceLanguage?: string;
   targetLanguage?: string;
+  channelId?: string;
+  streamId?: string;
 }
 
 export interface TranslationStatusMessage {
@@ -70,6 +73,8 @@ export interface TranslationStatusMessage {
   stage?: string;
   message?: string;
   speaker?: string;
+  channelId?: string;
+  streamId?: string;
 }
 
 export type TranslationMessage = TranslationCaptionMessage | TranslationStatusMessage;

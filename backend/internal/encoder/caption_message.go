@@ -76,41 +76,65 @@ func alphaOpacity(alpha int) float64 {
 	return float64(255-alpha) / 255
 }
 
-func translationMessage(event voicetranslate.Event) map[string]any {
+func translationMessage(event voicetranslate.Event, channelID, streamID string) map[string]any {
+	var message map[string]any
 	switch event.Type {
 	case voicetranslate.EventReady:
-		return map[string]any{"type": "translation-status", "status": "ready"}
+		message = map[string]any{"type": "translation-status", "status": "ready"}
 	case voicetranslate.EventPartial, voicetranslate.EventFinal:
 		if event.Translation == nil || *event.Translation == "" {
-			return map[string]any{
+			message = map[string]any{
 				"type": "translation-status", "status": "unavailable",
 				"stage": "translation", "captionId": boundedTranslationText(event.CaptionID, 256),
 			}
+			break
 		}
-		return map[string]any{
+		message = map[string]any{
 			"type": "translation-caption", "phase": event.Type,
 			"id": "translation-live", "captionId": boundedTranslationText(event.CaptionID, 256),
-			"text": boundedTranslationText(*event.Translation, 400), "sourceLanguage": boundedTranslationText(event.SourceLanguage, 32),
+			"text": boundedTranslationText(*event.Translation, 400), "originalText": boundedTranslationText(event.Text, 400),
+			"sourceLanguage": boundedTranslationText(event.SourceLanguage, 32),
 			"targetLanguage": boundedTranslationText(event.TargetLanguage, 32),
 		}
 	case voicetranslate.EventSpeech:
-		return map[string]any{
+		message = map[string]any{
 			"type": "translation-status", "status": "speaking",
 			"captionId": boundedTranslationText(event.CaptionID, 256), "speaker": boundedTranslationText(event.Speaker, 128),
 		}
 	case voicetranslate.EventSpeechCancelled:
-		return map[string]any{
+		message = map[string]any{
 			"type": "translation-status", "status": "speech-cancelled",
 			"captionId": boundedTranslationText(event.CaptionID, 256),
 		}
 	case voicetranslate.EventError:
-		return map[string]any{
+		stage, publicMessage := publicTranslationError(event.Stage)
+		message = map[string]any{
 			"type": "translation-status", "status": "error",
-			"stage": boundedTranslationText(event.Stage, 64), "message": boundedTranslationText(event.Message, 512),
+			"stage": stage, "message": publicMessage,
 			"captionId": boundedTranslationText(event.CaptionID, 256),
 		}
 	default:
-		return map[string]any{"type": "translation-status", "status": "unknown"}
+		message = map[string]any{"type": "translation-status", "status": "unknown"}
+	}
+	message["channelId"] = boundedTranslationText(channelID, 256)
+	message["streamId"] = boundedTranslationText(streamID, 256)
+	return message
+}
+
+func publicTranslationError(stage string) (string, string) {
+	switch stage {
+	case "capacity":
+		return "capacity", "Translation service is busy"
+	case "authentication":
+		return "authentication", "Translation authentication failed"
+	case "connection":
+		return "connection", "Translation service connection failed"
+	case "translation":
+		return "translation", "Translation failed"
+	case "speech":
+		return "speech", "Translated speech failed"
+	default:
+		return "service", "Translation service error"
 	}
 }
 

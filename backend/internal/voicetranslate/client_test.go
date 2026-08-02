@@ -193,6 +193,33 @@ func TestClientRejectsBinaryReadyEvent(t *testing.T) {
 	}
 }
 
+func TestClientDoesNotExposeUnexpectedReadyFields(t *testing.T) {
+	t.Parallel()
+	secret := strings.Repeat("s", 32)
+	upgrader := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := upgrader.Upgrade(w, r, nil)
+		if err != nil {
+			return
+		}
+		defer conn.Close()
+		if _, _, err := conn.ReadMessage(); err != nil {
+			return
+		}
+		_ = conn.WriteJSON(Event{Type: secret, Stage: "capacity", Message: "token=" + secret})
+	}))
+	defer server.Close()
+
+	config := Config{
+		URL: "ws" + strings.TrimPrefix(server.URL, "http") + "/ws", Origin: "https://honyaku.example.test",
+		AccessToken: strings.Repeat("a", 32), SourceLanguage: "auto", TargetLanguage: "ja", SpeechEnabled: true,
+	}
+	err := NewClient(config).Run(context.Background(), make(chan []byte), make(chan Event, 1))
+	if err == nil || strings.Contains(err.Error(), secret) {
+		t.Fatalf("unexpected ready error exposed upstream content: %v", err)
+	}
+}
+
 func TestValidateEventRejectsOversizedTextMetadata(t *testing.T) {
 	t.Parallel()
 	translation := strings.Repeat("x", maxTranslationBytes+1)

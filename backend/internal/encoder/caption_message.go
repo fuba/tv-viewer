@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/fuba/tv-viewer/internal/nativecaption"
+	"github.com/fuba/tv-viewer/internal/voicetranslate"
 )
 
 // captionMessage carries the caption exactly as the broadcaster laid it out:
@@ -73,4 +74,56 @@ func alphaOpacity(alpha int) float64 {
 		return 0
 	}
 	return float64(255-alpha) / 255
+}
+
+func translationMessage(event voicetranslate.Event) map[string]any {
+	switch event.Type {
+	case voicetranslate.EventReady:
+		return map[string]any{"type": "translation-status", "status": "ready"}
+	case voicetranslate.EventPartial, voicetranslate.EventFinal:
+		if event.Translation == nil || *event.Translation == "" {
+			return map[string]any{
+				"type": "translation-status", "status": "unavailable",
+				"stage": "translation", "captionId": boundedTranslationText(event.CaptionID, 256),
+			}
+		}
+		return map[string]any{
+			"type": "translation-caption", "phase": event.Type,
+			"id": "translation-live", "captionId": boundedTranslationText(event.CaptionID, 256),
+			"text": boundedTranslationText(*event.Translation, 400), "sourceLanguage": boundedTranslationText(event.SourceLanguage, 32),
+			"targetLanguage": boundedTranslationText(event.TargetLanguage, 32),
+		}
+	case voicetranslate.EventSpeech:
+		return map[string]any{
+			"type": "translation-status", "status": "speaking",
+			"captionId": boundedTranslationText(event.CaptionID, 256), "speaker": boundedTranslationText(event.Speaker, 128),
+		}
+	case voicetranslate.EventSpeechCancelled:
+		return map[string]any{
+			"type": "translation-status", "status": "speech-cancelled",
+			"captionId": boundedTranslationText(event.CaptionID, 256),
+		}
+	case voicetranslate.EventError:
+		return map[string]any{
+			"type": "translation-status", "status": "error",
+			"stage": boundedTranslationText(event.Stage, 64), "message": boundedTranslationText(event.Message, 512),
+			"captionId": boundedTranslationText(event.CaptionID, 256),
+		}
+	default:
+		return map[string]any{"type": "translation-status", "status": "unknown"}
+	}
+}
+
+func boundedTranslationText(value string, maximum int) string {
+	if maximum <= 0 {
+		return value
+	}
+	count := 0
+	for index := range value {
+		if count == maximum {
+			return value[:index]
+		}
+		count++
+	}
+	return value
 }

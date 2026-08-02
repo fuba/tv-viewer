@@ -18,19 +18,20 @@ const (
 
 // WebRTCSession owns one direct Go media pipeline.
 type WebRTCSession struct {
-	ID           string
-	ChannelID    string
-	ctx          context.Context
-	cancel       context.CancelFunc
-	stream       io.ReadCloser
-	VideoPipe    io.ReadCloser
-	VideoRaw     bool
-	AudioPipe    io.ReadCloser
-	AudioRaw     bool
-	SubtitlePipe io.ReadCloser
-	SubtitleRaw  bool
-	AudioMode    AudioMode
-	StreamURL    string
+	ID                 string
+	ChannelID          string
+	ctx                context.Context
+	cancel             context.CancelFunc
+	stream             io.ReadCloser
+	VideoPipe          io.ReadCloser
+	VideoRaw           bool
+	AudioPipe          io.ReadCloser
+	AudioRaw           bool
+	SubtitlePipe       io.ReadCloser
+	SubtitleRaw        bool
+	AudioMode          AudioMode
+	TranslationEnabled bool
+	StreamURL          string
 
 	mu      sync.Mutex
 	stopped bool

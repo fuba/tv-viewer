@@ -7,6 +7,6 @@ import (
 	"io"
 )
 
-func (e *Encoder) StartNativeWebRTCEncoding(_ string, _ io.ReadCloser, _ string, _ []uint16, _ bool, _ AudioMode) (*WebRTCSession, error) {
+func (e *Encoder) StartNativeWebRTCEncoding(_ string, _ io.ReadCloser, _ string, _ []uint16, _ bool, _ AudioMode, _ bool) (*WebRTCSession, error) {
 	return nil, fmt.Errorf("native WebRTC pipeline is unavailable in this build")
 }

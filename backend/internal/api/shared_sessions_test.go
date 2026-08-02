@@ -105,15 +105,18 @@ func TestFailedPeerAttachKeepsIdleShutdownArmed(t *testing.T) {
 }
 
 func TestSharedSessionSettingsMatch(t *testing.T) {
-	session := &sharedSession{burnInSubtitles: true, audioMode: encoder.AudioModeBoth}
-	if !session.matchesSettings(true, encoder.AudioModeBoth) {
+	session := &sharedSession{burnInSubtitles: true, audioMode: encoder.AudioModeBoth, translationEnabled: true}
+	if !session.matchesSettings(true, encoder.AudioModeBoth, true) {
 		t.Fatal("identical settings should share a session")
 	}
-	if session.matchesSettings(false, encoder.AudioModeBoth) {
+	if session.matchesSettings(false, encoder.AudioModeBoth, true) {
 		t.Fatal("subtitle change must replace the session")
 	}
-	if session.matchesSettings(true, encoder.AudioModeMain) {
+	if session.matchesSettings(true, encoder.AudioModeMain, true) {
 		t.Fatal("audio change must replace the session")
+	}
+	if session.matchesSettings(true, encoder.AudioModeBoth, false) {
+		t.Fatal("translation change must replace the session")
 	}
 }
 

@@ -24,16 +24,17 @@ const (
 
 // SignalingMessage represents a WebRTC signaling message
 type SignalingMessage struct {
-	Type            string                     `json:"type"`
-	PeerID          string                     `json:"peerId,omitempty"`
-	ChannelID       string                     `json:"channelId,omitempty"`
-	RequestID       string                     `json:"requestId,omitempty"`
-	SDP             *webrtc.SessionDescription `json:"sdp,omitempty"`
-	Candidate       *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
-	Error           string                     `json:"error,omitempty"`
-	Timestamp       int64                      `json:"timestamp,omitempty"`
-	BurnInSubtitles *bool                      `json:"burnInSubtitles,omitempty"` // If true, ARIB captions are sent over the data channel
-	AudioMode       *string                    `json:"audioMode,omitempty"`       // Dual mono mode: "main", "sub", or "both"
+	Type               string                     `json:"type"`
+	PeerID             string                     `json:"peerId,omitempty"`
+	ChannelID          string                     `json:"channelId,omitempty"`
+	RequestID          string                     `json:"requestId,omitempty"`
+	SDP                *webrtc.SessionDescription `json:"sdp,omitempty"`
+	Candidate          *webrtc.ICECandidateInit   `json:"candidate,omitempty"`
+	Error              string                     `json:"error,omitempty"`
+	Timestamp          int64                      `json:"timestamp,omitempty"`
+	BurnInSubtitles    *bool                      `json:"burnInSubtitles,omitempty"`    // If true, ARIB captions are sent over the data channel
+	AudioMode          *string                    `json:"audioMode,omitempty"`          // Dual mono mode: "main", "sub", or "both"
+	TranslationEnabled *bool                      `json:"translationEnabled,omitempty"` // If true, replace audio and captions with Japanese translation
 }
 
 // SubtitleMessage represents a subtitle event sent via DataChannel

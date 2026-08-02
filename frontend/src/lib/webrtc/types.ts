@@ -15,6 +15,7 @@ export interface SignalingMessage {
   timestamp?: number;
   burnInSubtitles?: boolean; // If true, ARIB captions are sent over the data channel
   audioMode?: AudioMode;     // Dual mono mode: 'main' (left), 'sub' (right), 'both' (stereo)
+  translationEnabled?: boolean; // If true, replace audio and captions with Japanese translation
 }
 
 // One run of characters as ARIB placed it on the caption plane
@@ -52,6 +53,27 @@ export interface SubtitleMessage {
   rows?: CaptionRow[];
 }
 
+export interface TranslationCaptionMessage {
+  type: 'translation-caption';
+  phase: 'partial' | 'final';
+  id?: string;
+  captionId?: string;
+  text: string;
+  sourceLanguage?: string;
+  targetLanguage?: string;
+}
+
+export interface TranslationStatusMessage {
+  type: 'translation-status';
+  status: 'ready' | 'speaking' | 'speech-cancelled' | 'unavailable' | 'error' | 'unknown';
+  captionId?: string;
+  stage?: string;
+  message?: string;
+  speaker?: string;
+}
+
+export type TranslationMessage = TranslationCaptionMessage | TranslationStatusMessage;
+
 // Video geometry announced by the server, parsed from the MPEG-2 sequence header
 export type { VideoFormatMessage } from '../videoFormat';
 
@@ -68,9 +90,11 @@ export interface RTCClientOptions {
   channelId: string;
   burnInSubtitles?: boolean; // If true, ARIB captions are sent over the data channel
   audioMode?: AudioMode;     // Dual mono mode: 'main', 'sub', or 'both' (default: 'both')
+  translationEnabled?: boolean;
   onTrack?: (track: MediaStreamTrack, stream: MediaStream) => void;
   onConnectionStateChange?: (state: ConnectionStatus) => void;
   onSubtitle?: (subtitle: SubtitleMessage) => void;
+  onTranslation?: (message: TranslationMessage) => void;
   onVideoFormat?: (format: VideoFormatMessage) => void; // Broadcast picture geometry (aspect ratio)
   onEncodingRestarted?: (channelId: string, requestId?: string) => void; // Called when encoding is restarted (e.g., subtitle toggle, channel change)
   onError?: (error: Error, requestId?: string) => void;

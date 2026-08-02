@@ -84,3 +84,25 @@ func TestWebSocketOriginFailsClosedWithoutAllowlist(t *testing.T) {
 		t.Fatal("browser origin was accepted without an allowlist")
 	}
 }
+
+func TestTranslationRequestRequiresAllowedBrowserOrigin(t *testing.T) {
+	t.Setenv("ALLOWED_ORIGINS", "https://tv.home.fuba.dev")
+	tests := []struct {
+		name   string
+		origin string
+		want   bool
+	}{
+		{name: "missing origin", want: false},
+		{name: "allowed origin", origin: "https://tv.home.fuba.dev", want: true},
+		{name: "foreign origin", origin: "https://attacker.example", want: false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest("GET", "https://tv.home.fuba.dev/api/ws/webrtc/GR_1", nil)
+			req.Header.Set("Origin", tt.origin)
+			if got := translationRequestAllowed(req); got != tt.want {
+				t.Fatalf("translationRequestAllowed() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}

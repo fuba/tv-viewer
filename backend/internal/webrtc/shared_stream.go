@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/binary"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -52,9 +53,11 @@ type SharedStream struct {
 	stopped       bool
 	onPeerRemoved func(string)
 
-	bootstrapMu sync.Mutex
-	bootstrap   []sharedSample
-	publishMu   sync.Mutex
+	bootstrapMu       sync.Mutex
+	bootstrap         []sharedSample
+	statusMu          sync.RWMutex
+	translationStatus []byte
+	publishMu         sync.Mutex
 }
 
 func (s *SharedStream) SetOnPeerRemoved(callback func(string)) {
@@ -110,6 +113,12 @@ func (s *SharedStream) AddPeer(peer *Peer) error {
 		}
 	}
 	s.subscribers[peer.ID] = sub
+	status := s.translationStatusSnapshot()
+	if len(status) > 0 && !s.enqueueSubtitleJSON(sub, status) {
+		delete(s.subscribers, peer.ID)
+		s.mu.Unlock()
+		return fmt.Errorf("peer %s cannot accept translation status", peer.ID)
+	}
 	s.mu.Unlock()
 
 	go s.writeVideo(sub)
@@ -289,6 +298,18 @@ func (s *SharedStream) writeSubtitles(sub *sharedSubscriber) {
 }
 
 func (s *SharedStream) writeSubtitleJSON(sub *sharedSubscriber) {
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-sub.done:
+			cancel()
+		case <-ctx.Done():
+		}
+	}()
+	if err := sub.peer.WaitDataChannelOpen(ctx); err != nil {
+		return
+	}
 	for {
 		select {
 		case <-sub.done:
@@ -543,12 +564,33 @@ func (s *SharedStream) RunSubtitlesRaw(reader io.Reader) error {
 		if _, err := io.ReadFull(reader, message); err != nil {
 			return err
 		}
+		s.rememberTranslationStatus(message)
 		for _, sub := range s.subscriberSnapshot() {
 			if !s.enqueueSubtitleJSON(sub, message) {
 				s.RemovePeer(sub.peer.ID)
 			}
 		}
 	}
+}
+
+func (s *SharedStream) rememberTranslationStatus(message []byte) {
+	var envelope struct {
+		Type   string `json:"type"`
+		Status string `json:"status"`
+	}
+	if json.Unmarshal(message, &envelope) != nil || envelope.Type != "translation-status" ||
+		(envelope.Status != "ready" && envelope.Status != "error") {
+		return
+	}
+	s.statusMu.Lock()
+	s.translationStatus = append(s.translationStatus[:0], message...)
+	s.statusMu.Unlock()
+}
+
+func (s *SharedStream) translationStatusSnapshot() []byte {
+	s.statusMu.RLock()
+	defer s.statusMu.RUnlock()
+	return append([]byte(nil), s.translationStatus...)
 }
 
 // Stop disconnects all subscribers and cancels shared readers.

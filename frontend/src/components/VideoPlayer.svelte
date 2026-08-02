@@ -1,14 +1,22 @@
 <script lang="ts">
   import { createEventDispatcher, onDestroy, onMount, tick } from 'svelte'
-  import { RTCClient, type ConnectionStatus, type AudioMode, type SubtitleMessage } from '../lib/webrtc/RTCClient'
+  import { RTCClient, type ConnectionStatus, type AudioMode, type SubtitleMessage, type TranslationMessage } from '../lib/webrtc/RTCClient'
   import { channelSelectionId } from '../lib/channelSelection'
   import { reconnectDelay, shouldRecoverStream } from '../lib/streamRecovery'
   import { createOrientationLockCoordinator, requestViewerFullscreen, type OrientationController } from '../lib/fullscreen'
   import { fittedFullscreenVideoSize } from '../lib/viewportFit'
   import { normalizedVolume } from '../lib/audioVolume'
   import { broadcastDisplayAspect, displayAspectRatio, type VideoFormatMessage } from '../lib/videoFormat'
+  import {
+    translationCaptionState,
+    translationStatusAfterRestart,
+    translationStatusClearsCaption,
+    type TranslationCaptionState,
+    type TranslationUIStatus,
+  } from '../lib/translationCaption'
   import TunerStatus from './TunerStatus.svelte'
   import SubtitleRenderer from './SubtitleRenderer.svelte'
+  import TranslationSubtitleRenderer from './TranslationSubtitleRenderer.svelte'
 
   const dispatch = createEventDispatcher()
 
@@ -49,6 +57,13 @@
   // 'both' = stereo, 'main' = left channel, 'sub' = right channel
   let audioMode: AudioMode = 'both'
 
+  // VoiceTranslate replaces both the broadcast captions and the WebRTC audio.
+  let translationEnabled = false
+  let translationStatus: TranslationUIStatus = 'off'
+  let translationCaption: TranslationCaptionState | null = null
+  let translationTimer: ReturnType<typeof setTimeout> | null = null
+  let lastTranslationErrorAt = 0
+
   let activeSubtitles: Record<string, SubtitleMessage> = {}
   let activeCaptions: SubtitleMessage[] = []
   const subtitleTimers = new Map<string, ReturnType<typeof setTimeout>>()
@@ -76,6 +91,9 @@
     requestedChannel: any
     previousAudioMode: AudioMode
     requestedAudioMode: AudioMode
+    previousTranslationEnabled: boolean
+    requestedTranslationEnabled: boolean
+    previousTranslationStatus: TranslationUIStatus
   } | null = null
 
   const maximumRecoveryAttempts = 5
@@ -404,6 +422,42 @@
     activeCaptions = []
   }
 
+  function clearTranslationCaption() {
+    if (translationTimer) clearTimeout(translationTimer)
+    translationTimer = null
+    translationCaption = null
+  }
+
+  function handleTranslation(message: TranslationMessage) {
+    if (message.type === 'translation-status') {
+      if (!translationEnabled && translationStatus !== 'connecting') return
+      if (message.status === 'ready') {
+        translationStatus = 'ready'
+        lastTranslationErrorAt = 0
+        addLog('VoiceTranslate is ready', 'success')
+      } else if (message.status === 'error') {
+        translationStatus = 'error'
+        const errorText = `VoiceTranslate ${message.stage || 'error'}: ${message.message || 'translation failed'}`
+        const now = Date.now()
+        if (now - lastTranslationErrorAt >= 10_000) {
+          lastTranslationErrorAt = now
+          addLog(errorText, 'error')
+        }
+      }
+      if (translationStatusClearsCaption(message.status)) clearTranslationCaption()
+      return
+    }
+    if (!translationEnabled && translationStatus !== 'connecting') return
+    const caption = translationCaptionState(message, Date.now())
+    if (!caption) return
+    translationCaption = caption
+    if (translationTimer) clearTimeout(translationTimer)
+    translationTimer = setTimeout(() => {
+      translationTimer = null
+      if (translationCaption?.expiresAt === caption.expiresAt) translationCaption = null
+    }, Math.max(0, caption.expiresAt - Date.now()))
+  }
+
   function updateSubtitleText() {
     activeCaptions = Object.values(activeSubtitles)
   }
@@ -449,6 +503,31 @@
     // Captions are always received; toggling display does not interrupt media.
   }
 
+  function toggleTranslation() {
+    const requestedTranslationEnabled = !translationEnabled
+    addLog(`Translation: ${requestedTranslationEnabled ? 'ON' : 'OFF'}`)
+    if (!requestedTranslationEnabled) clearTranslationCaption()
+    if (rtcClient && streamStarted) {
+      beginStartAttempt()
+      const previousTranslationStatus = translationStatus
+      translationStatus = requestedTranslationEnabled ? 'connecting' : 'off'
+      const requestId = rtcClient.setTranslationEnabled(requestedTranslationEnabled)
+      pendingRestart = {
+        requestId,
+        previousChannel: currentChannel,
+        requestedChannel: currentChannel,
+        previousAudioMode: audioMode,
+        requestedAudioMode: audioMode,
+        previousTranslationEnabled: translationEnabled,
+        requestedTranslationEnabled,
+        previousTranslationStatus,
+      }
+    } else {
+      translationEnabled = requestedTranslationEnabled
+      translationStatus = requestedTranslationEnabled ? 'connecting' : 'off'
+    }
+  }
+
   // Cycle through audio modes: both -> main -> sub -> both
   function cycleAudioMode() {
     const modes: AudioMode[] = ['both', 'main', 'sub']
@@ -458,6 +537,8 @@
     // Restart encoding with new setting if currently streaming
     if (rtcClient && streamStarted) {
       beginStartAttempt()
+      const previousTranslationStatus = translationStatus
+      if (translationEnabled) translationStatus = 'connecting'
       const requestId = rtcClient.setAudioMode(requestedAudioMode)
       pendingRestart = {
         requestId,
@@ -465,6 +546,9 @@
         requestedChannel: currentChannel,
         previousAudioMode: audioMode,
         requestedAudioMode,
+        previousTranslationEnabled: translationEnabled,
+        requestedTranslationEnabled: translationEnabled,
+        previousTranslationStatus,
       }
     } else {
       audioMode = requestedAudioMode
@@ -483,7 +567,7 @@
   function addLog(message: string, type: 'info' | 'error' | 'success' = 'info') {
     const timestamp = new Date().toLocaleTimeString()
     const logEntry = `[${timestamp}] ${message}`
-    debugLogs = [logEntry, ...debugLogs.slice(0, 99999)]
+    debugLogs = [logEntry, ...debugLogs.slice(0, 999)]
     console.log(message)
   }
 
@@ -564,13 +648,18 @@
     if (rtcClient && connectionStatus === 'connected' && currentChannel) {
       addLog(`Switching channel from ${currentChannel.channel} to ${channelId} using restart-encoding`)
       clearSubtitles()
-      const requestId = rtcClient.restartEncoding({ channelId, burnInSubtitles: true, audioMode })
+      const previousTranslationStatus = translationStatus
+      if (translationEnabled) translationStatus = 'connecting'
+      const requestId = rtcClient.restartEncoding({ channelId, burnInSubtitles: true, audioMode, translationEnabled })
       pendingRestart = {
         requestId,
         previousChannel: currentChannel,
         requestedChannel: channel,
         previousAudioMode: audioMode,
         requestedAudioMode: audioMode,
+        previousTranslationEnabled: translationEnabled,
+        requestedTranslationEnabled: translationEnabled,
+        previousTranslationStatus,
       }
       return
     }
@@ -608,6 +697,7 @@
         channelId,
         burnInSubtitles: true,
         audioMode,
+        translationEnabled,
         onTrack: (track, stream) => {
           // Ignore callbacks from old streams
           if (thisStreamSequence !== streamSequence) {
@@ -673,6 +763,8 @@
             selectedChannel = pendingRestart.previousChannel
             currentChannel = pendingRestart.previousChannel
             audioMode = pendingRestart.previousAudioMode
+            translationEnabled = pendingRestart.previousTranslationEnabled
+            translationStatus = pendingRestart.previousTranslationStatus
             pendingRestart = null
           }
           settleStartAttempt()
@@ -683,6 +775,9 @@
             currentChannel = pendingRestart.requestedChannel
             selectedChannel = pendingRestart.requestedChannel
             audioMode = pendingRestart.requestedAudioMode
+            translationEnabled = pendingRestart.requestedTranslationEnabled
+            translationStatus = translationStatusAfterRestart(translationStatus, translationEnabled)
+            if (!translationEnabled) clearTranslationCaption()
             pendingRestart = null
           }
           addLog(`Encoding restarted for channel ${newChannelId}`, 'success')
@@ -690,9 +785,10 @@
           schedulePipelineLogs(newChannelId)
         },
         onSubtitle: handleSubtitle,
+        onTranslation: handleTranslation,
         onVideoFormat: applyVideoFormat,
         onLog: (message) => {
-          debugLogs = [message, ...debugLogs.slice(0, 99999)]
+          debugLogs = [message, ...debugLogs.slice(0, 999)]
         }
       })
 
@@ -745,6 +841,7 @@
     orientationLockCoordinator?.destroy()
     orientationLockCoordinator = null
     clearSubtitles()
+    clearTranslationCaption()
     clearStartWatchdog()
     if (pipelineLogTimer) clearTimeout(pipelineLogTimer)
     if (rtcClient) {
@@ -825,8 +922,12 @@
         >
         </video>
 
-        {#if burnInSubtitles && activeCaptions.length}
+        {#if burnInSubtitles && !translationEnabled && activeCaptions.length}
           <SubtitleRenderer captions={activeCaptions} />
+        {/if}
+
+        {#if translationEnabled && translationCaption}
+          <TranslationSubtitleRenderer caption={translationCaption} />
         {/if}
 
         {#if isStartingStream}
@@ -884,6 +985,19 @@
       <button class="bar-button" class:active={burnInSubtitles} on:click={toggleSubtitles} disabled={isStartingStream} aria-pressed={burnInSubtitles}>
         <span class="bar-label">字幕</span>
         <strong>{burnInSubtitles ? '入' : '切'}</strong>
+      </button>
+      <button
+        class="bar-button"
+        class:active={translationEnabled}
+        class:translation-error={translationStatus === 'error'}
+        on:click={toggleTranslation}
+        disabled={isStartingStream || !streamStarted}
+        aria-pressed={translationEnabled}
+        aria-label="遅延する日本語翻訳字幕と翻訳音声を切り替え"
+        title="認識後に数秒遅れて再生 · 日本語字幕・VOICEVOX:ずんだもん音声"
+      >
+        <span class="bar-label">遅延翻訳</span>
+        <strong>{translationEnabled ? '入' : '切'}</strong>
       </button>
       <div class="volume-control">
         <button

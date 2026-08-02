@@ -35,6 +35,10 @@ func webSocketOriginAllowed(request *http.Request) bool {
 	return requestOriginAllowed(request)
 }
 
+func translationRequestAllowed(request *http.Request) bool {
+	return request.Header.Get("Origin") != "" && requestOriginAllowed(request)
+}
+
 func parseHTTPOrigin(raw string) (*url.URL, bool) {
 	parsed, err := url.Parse(raw)
 	if err != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Hostname() == "" ||

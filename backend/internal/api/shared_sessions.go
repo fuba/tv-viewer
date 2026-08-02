@@ -15,11 +15,12 @@ import (
 const idleSessionGrace = 5 * time.Second
 
 type sharedSession struct {
-	channelID       string
-	session         *encoder.WebRTCSession
-	stream          *webrtc.SharedStream
-	burnInSubtitles bool
-	audioMode       encoder.AudioMode
+	channelID          string
+	session            *encoder.WebRTCSession
+	stream             *webrtc.SharedStream
+	burnInSubtitles    bool
+	audioMode          encoder.AudioMode
+	translationEnabled bool
 
 	mu       sync.Mutex
 	peers    map[string]struct{}
@@ -31,18 +32,20 @@ type sharedSession struct {
 	onUnexpectedStop func([]string, error)
 }
 
-func (s *sharedSession) matchesSettings(burnInSubtitles bool, audioMode encoder.AudioMode) bool {
-	return s != nil && s.burnInSubtitles == burnInSubtitles && s.audioMode == audioMode
+func (s *sharedSession) matchesSettings(burnInSubtitles bool, audioMode encoder.AudioMode, translationEnabled bool) bool {
+	return s != nil && s.burnInSubtitles == burnInSubtitles && s.audioMode == audioMode &&
+		s.translationEnabled == translationEnabled
 }
 
-func newSharedSession(channelID string, session *encoder.WebRTCSession, burnInSubtitles bool, audioMode encoder.AudioMode) *sharedSession {
+func newSharedSession(channelID string, session *encoder.WebRTCSession, burnInSubtitles bool, audioMode encoder.AudioMode, translationEnabled bool) *sharedSession {
 	s := &sharedSession{
-		channelID:       channelID,
-		session:         session,
-		stream:          webrtc.NewSharedStream(),
-		burnInSubtitles: burnInSubtitles,
-		audioMode:       audioMode,
-		peers:           make(map[string]struct{}),
+		channelID:          channelID,
+		session:            session,
+		stream:             webrtc.NewSharedStream(),
+		burnInSubtitles:    burnInSubtitles,
+		audioMode:          audioMode,
+		translationEnabled: translationEnabled,
+		peers:              make(map[string]struct{}),
 		onUnexpectedStop: func(peerIDs []string, _ error) {
 			for _, peerID := range peerIDs {
 				peerManager.RemovePeer(peerID)
@@ -217,13 +220,13 @@ func (r *sharedSessionRegistry) get(channelID string) *sharedSession {
 	return r.sessions[channelID]
 }
 
-func (r *sharedSessionRegistry) register(channelID string, session *encoder.WebRTCSession, burnInSubtitles bool, audioMode encoder.AudioMode) *sharedSession {
+func (r *sharedSessionRegistry) register(channelID string, session *encoder.WebRTCSession, burnInSubtitles bool, audioMode encoder.AudioMode, translationEnabled bool) *sharedSession {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if existing := r.sessions[channelID]; existing != nil {
 		return existing
 	}
-	shared := newSharedSession(channelID, session, burnInSubtitles, audioMode)
+	shared := newSharedSession(channelID, session, burnInSubtitles, audioMode, translationEnabled)
 	r.sessions[channelID] = shared
 	go shared.runReaders()
 	return shared

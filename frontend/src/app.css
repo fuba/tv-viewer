@@ -90,6 +90,8 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 }
 .bar-button:hover:not(:disabled) { background: var(--accent-soft); color: var(--text); }
 .bar-button.active { color: var(--text); }
+.bar-button.translation-error { color: var(--danger); }
+.bar-button.translation-error strong { color: var(--danger); }
 .bar-button:disabled { opacity: .4; }
 .bar-button strong { color: var(--text); font-weight: 650; }
 .bar-label { color: var(--muted); font-weight: 500; }
@@ -172,6 +174,13 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
   .volume-popover { width: min(12rem, 46vw); }
 }
 
+@media (max-width: 420px) {
+  .player-bar { padding-inline: max(.4rem, env(safe-area-inset-left)) max(.4rem, env(safe-area-inset-right)); }
+  .bar-channel, .bar-spacer { display: none; }
+  .bar-actions { width: 100%; justify-content: space-between; }
+  .bar-button { min-width: 2.15rem; padding-inline: .25rem; }
+}
+
 @font-face {
   font-family: 'WLMaru2004Emoji';
   src: url('/wlmaru2004emoji.ttf') format('truetype');
@@ -179,6 +188,60 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
 }
 
 .live-subtitle-layer { position: absolute; inset: 0; z-index: 10; pointer-events: none; }
+
+.translation-subtitle-layer {
+  position: absolute;
+  inset: 0;
+  z-index: 11;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+.translation-subtitle-body {
+  position: absolute;
+  right: 4%;
+  bottom: 8%;
+  left: 4%;
+  box-sizing: border-box;
+  width: fit-content;
+  max-width: 92%;
+  max-height: 38%;
+  margin-inline: auto;
+  overflow: hidden;
+  padding: .28em .5em .34em;
+  background: rgb(0 0 0 / 78%);
+  color: #fff;
+  font-family: 'WLMaru2004Emoji', 'Hiragino Kaku Gothic ProN', 'Hiragino Sans', Meiryo, sans-serif;
+  font-size: clamp(1.05rem, 3.1cqw, 3.4rem);
+  font-weight: 500;
+  line-height: 1.38;
+  letter-spacing: .015em;
+  text-align: center;
+  text-shadow: 0 .06em .12em #000;
+}
+
+.translation-credit {
+  display: block;
+  margin-bottom: .12em;
+  color: rgb(255 255 255 / 70%);
+  font-family: ui-sans-serif, system-ui, sans-serif;
+  font-size: .34em;
+  font-weight: 600;
+  letter-spacing: .04em;
+  line-height: 1.2;
+  text-align: left;
+}
+
+.translation-text {
+  display: -webkit-box;
+  overflow: hidden;
+  line-break: strict;
+  overflow-wrap: anywhere;
+  text-wrap: balance;
+  white-space: normal;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
 
 .live-subtitle-body {
   /* Centring with left:50% would cap the line at half the picture, because an
@@ -219,5 +282,15 @@ button:focus-visible { outline: 1px solid var(--accent); outline-offset: 1px; }
    caption plane is lifted as a whole so the broadcast layout stays intact. */
 .player-shell:not(.controls-hidden) .live-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + .5rem); }
 .player-shell.volume-control-open .live-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + 4.5rem); }
+.player-shell:not(.controls-hidden) .translation-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + .6rem); }
+.player-shell.volume-control-open .translation-subtitle-body { bottom: calc(var(--bar-height) + env(safe-area-inset-bottom) + 4.6rem); }
 .player-shell:not(.controls-hidden) .caption-plane { transform: translateY(calc(-1 * (var(--bar-height) + env(safe-area-inset-bottom)))); }
 .player-shell.volume-control-open .caption-plane { transform: translateY(calc(-1 * (var(--bar-height) + env(safe-area-inset-bottom) + 4rem))); }
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .translation-subtitle-body {
+    max-height: 46%;
+    font-size: clamp(.9rem, 4.8cqh, 1.6rem);
+  }
+  .translation-text { -webkit-line-clamp: 3; }
+}

@@ -1,10 +1,12 @@
 package encoder
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/fuba/tv-viewer/internal/nativecaption"
+	"github.com/fuba/tv-viewer/internal/voicetranslate"
 )
 
 func placedCaption() nativecaption.Caption {
@@ -20,6 +22,49 @@ func placedCaption() nativecaption.Caption {
 				{Text: "言わなくても分かるよ。", Left: 378, Width: 440, Chars: 11, FontWidth: 36, FontHeight: 36, HorizontalSpace: 4, Foreground: 0xFFFFFF},
 			}},
 		},
+	}
+}
+
+func TestTranslationMessageDoesNotForwardSynthesizedAudio(t *testing.T) {
+	translation := "こんにちは、世界。"
+	message := translationMessage(voicetranslate.Event{
+		Type: voicetranslate.EventFinal, CaptionID: "caption-1", Text: "Hello world.",
+		Translation: &translation, TargetLanguage: "ja", AudioBase64: "must-not-leave-the-server",
+	})
+	if message["type"] != "translation-caption" || message["phase"] != "final" || message["text"] != translation {
+		t.Fatalf("translation message = %v", message)
+	}
+	if _, exists := message["audio_base64"]; exists {
+		t.Fatalf("synthesized audio leaked into DataChannel: %v", message)
+	}
+}
+
+func TestTranslationStatusMessageCarriesSafeState(t *testing.T) {
+	message := translationMessage(voicetranslate.Event{Type: voicetranslate.EventError, Stage: "capacity", Message: "busy"})
+	if message["type"] != "translation-status" || message["status"] != "error" || message["stage"] != "capacity" {
+		t.Fatalf("translation status = %v", message)
+	}
+}
+
+func TestTranslationMessageBoundsAllForwardedGatewayMetadata(t *testing.T) {
+	translation := strings.Repeat("訳", 500)
+	message := translationMessage(voicetranslate.Event{
+		Type: voicetranslate.EventFinal, CaptionID: strings.Repeat("c", 300), Translation: &translation,
+		SourceLanguage: strings.Repeat("s", 50), TargetLanguage: strings.Repeat("t", 50),
+	})
+	if len([]rune(message["text"].(string))) != 400 || len(message["captionId"].(string)) != 256 {
+		t.Fatalf("translation fields were not bounded: %v", message)
+	}
+	if len(message["sourceLanguage"].(string)) != 32 || len(message["targetLanguage"].(string)) != 32 {
+		t.Fatalf("language fields were not bounded: %v", message)
+	}
+
+	status := translationMessage(voicetranslate.Event{
+		Type: voicetranslate.EventError, CaptionID: strings.Repeat("c", 300),
+		Stage: strings.Repeat("s", 100), Message: strings.Repeat("m", 600),
+	})
+	if len(status["captionId"].(string)) != 256 || len(status["stage"].(string)) != 64 || len(status["message"].(string)) != 512 {
+		t.Fatalf("status fields were not bounded: %v", status)
 	}
 }
 

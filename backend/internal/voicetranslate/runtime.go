@@ -116,7 +116,6 @@ func (r *Runtime) handleEvent(event Event) {
 		event.AudioBase64 = ""
 		r.emit(event)
 	case EventSpeechCancelled:
-		r.mixer.Cancel(event.CaptionID)
 		r.emit(event)
 	default:
 		r.emit(event)
@@ -145,7 +144,12 @@ func (r *Runtime) enqueueSpeech(event Event) error {
 	if err != nil {
 		return fmt.Errorf("resample VoiceTranslate speech: %w", err)
 	}
-	r.mixer.Enqueue(event.CaptionID, pcm)
+	if !r.mixer.EnqueueContext(r.ctx, event.CaptionID, pcm) {
+		if err := r.ctx.Err(); err != nil {
+			return err
+		}
+		return errors.New("VoiceTranslate speech could not be queued")
+	}
 	return nil
 }
 
@@ -176,14 +180,12 @@ func (r *Runtime) enqueueFrame(frame []byte) {
 		return
 	default:
 	}
-	// Keep live audio current if the gateway stalls instead of accumulating lag.
-	select {
-	case <-r.frames:
-	default:
-	}
-	select {
-	case r.frames <- frame:
-	default:
+	// Never hide missing translation input by silently dropping an old frame.
+	if r.failed.CompareAndSwap(false, true) {
+		r.emit(Event{Type: EventError, Stage: "audio", Message: "VoiceTranslate audio upload cannot keep up"})
+		if r.cancel != nil {
+			r.cancel()
+		}
 	}
 }
 

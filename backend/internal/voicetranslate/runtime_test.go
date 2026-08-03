@@ -104,7 +104,7 @@ func TestRuntimeFallsBackToBroadcastAudioWhenConnectionFails(t *testing.T) {
 	t.Fatal("timed out waiting for connection failure")
 }
 
-func TestRuntimeHonorsSpeechCancellation(t *testing.T) {
+func TestRuntimeDoesNotDiscardReceivedSpeechOnLateCancellation(t *testing.T) {
 	t.Parallel()
 	runtime := &Runtime{mixer: NewSpeechMixer()}
 	wav := pcm16WAVForTest(48000, 1, []int16{1000, 2000, 3000})
@@ -113,8 +113,18 @@ func TestRuntimeHonorsSpeechCancellation(t *testing.T) {
 		AudioBase64: base64.StdEncoding.EncodeToString(wav),
 	})
 	runtime.handleEvent(Event{Type: EventSpeechCancelled, CaptionID: "caption-1"})
-	if got := runtime.mixer.TakeStereo(2); got[0] != 0 || got[1] != 0 {
-		t.Fatalf("cancelled speech remained in mixer: %v", got)
+	if got := runtime.mixer.TakeStereo(2); got[0] != 1000 || got[1] != 1000 {
+		t.Fatalf("late cancellation discarded received speech: %v", got)
+	}
+}
+
+func TestRuntimeFailsTranslationInsteadOfDroppingInputFrames(t *testing.T) {
+	t.Parallel()
+	runtime := &Runtime{frames: make(chan []byte, 1), mixer: NewSpeechMixer()}
+	runtime.enqueueFrame(make([]byte, translationFrameBytes))
+	runtime.enqueueFrame(make([]byte, translationFrameBytes))
+	if !runtime.failed.Load() {
+		t.Fatal("translation input overflow did not fail closed")
 	}
 }
 

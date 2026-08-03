@@ -1,15 +1,24 @@
 package voicetranslate
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"fmt"
+	"log"
 	"math"
 	"sync"
 )
 
 const decimatorTaps = 63
-const maxSpeechQueueSamples = 48000 * 2 * 8
+
+const (
+	speechSampleRate         = 48000
+	speechChannels           = 2
+	maxSpeechSegmentSamples  = speechSampleRate * speechChannels * 8
+	maxSpeechBacklogSamples  = speechSampleRate * speechChannels * 120
+	maxSpeechBacklogSegments = 1024
+)
 
 // PCMConverter applies an anti-aliasing FIR filter while downmixing 48 kHz
 // stereo PCM to the 16 kHz mono PCM required by VoiceTranslate.
@@ -134,7 +143,7 @@ func ResampleTo48kStereo(input WAV) ([]int16, error) {
 	if inputFrames == 0 {
 		return nil, nil
 	}
-	maxOutputFrames := maxSpeechQueueSamples / 2
+	maxOutputFrames := maxSpeechSegmentSamples / speechChannels
 	if inputFrames > maxOutputFrames*input.SampleRate/48000 {
 		return nil, errors.New("VoiceTranslate speech exceeds 8 seconds")
 	}
@@ -166,79 +175,76 @@ func ResampleTo48kStereo(input WAV) ([]int16, error) {
 
 // SpeechMixer serializes synthesized utterances into the live audio timeline.
 type SpeechMixer struct {
-	mu        sync.Mutex
-	queue     []speechSegment
-	offset    int
-	queued    int
-	cancelled map[string]struct{}
-	cancelIDs []string
+	mu             sync.Mutex
+	queue          []speechSegment
+	queued         int
+	spaceAvailable chan struct{}
 }
 
 type speechSegment struct {
-	captionID string
-	samples   []int16
+	source   []int16
+	playback []int16
+	offset   int
 }
 
 func NewSpeechMixer() *SpeechMixer {
-	return &SpeechMixer{cancelled: make(map[string]struct{})}
+	return &SpeechMixer{spaceAvailable: make(chan struct{}, 1)}
 }
 
 func (m *SpeechMixer) Enqueue(captionID string, samples []int16) bool {
-	if m == nil || captionID == "" || len(samples) == 0 {
-		return false
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, cancelled := m.cancelled[captionID]; cancelled {
-		return false
-	}
-	if len(samples) > maxSpeechQueueSamples {
-		samples = samples[:maxSpeechQueueSamples]
-	}
-	if m.queued+len(samples) > maxSpeechQueueSamples {
-		m.queue = nil
-		m.offset = 0
-		m.queued = 0
-	}
-	m.queue = append(m.queue, speechSegment{captionID: captionID, samples: append([]int16(nil), samples...)})
-	m.queued += len(samples)
-	return true
+	return m.EnqueueContext(context.Background(), captionID, samples)
 }
 
-func (m *SpeechMixer) Cancel(captionID string) {
-	if m == nil || captionID == "" {
-		return
+// EnqueueContext applies backpressure instead of dropping speech when the queue is full.
+func (m *SpeechMixer) EnqueueContext(ctx context.Context, captionID string, samples []int16) bool {
+	if m == nil || captionID == "" || len(samples) == 0 || len(samples) > maxSpeechSegmentSamples || len(samples)%speechChannels != 0 {
+		return false
+	}
+	for {
+		m.mu.Lock()
+		if m.queued+len(samples) <= maxSpeechBacklogSamples && len(m.queue) < maxSpeechBacklogSegments {
+			m.queue = append(m.queue, speechSegment{source: append([]int16(nil), samples...)})
+			m.queued += len(samples)
+			m.mu.Unlock()
+			return true
+		}
+		spaceAvailable := m.spaceAvailable
+		m.mu.Unlock()
+		select {
+		case <-ctx.Done():
+			return false
+		case <-spaceAvailable:
+		}
+	}
+}
+
+func playbackRateForBacklog(backlogSeconds float64) float64 {
+	switch {
+	case backlogSeconds >= 30:
+		return 2
+	case backlogSeconds >= 20:
+		return 1.75
+	case backlogSeconds >= 12:
+		return 1.5
+	case backlogSeconds >= 8:
+		return 1.3
+	case backlogSeconds >= 4:
+		return 1.2
+	case backlogSeconds >= 1.5:
+		return 1.1
+	default:
+		return 1
+	}
+}
+
+// QueuedFrames reports source frames that still belong to queued utterances.
+func (m *SpeechMixer) QueuedFrames() int {
+	if m == nil {
+		return 0
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if _, exists := m.cancelled[captionID]; !exists {
-		m.cancelled[captionID] = struct{}{}
-		m.cancelIDs = append(m.cancelIDs, captionID)
-		if len(m.cancelIDs) > 256 {
-			delete(m.cancelled, m.cancelIDs[0])
-			m.cancelIDs = m.cancelIDs[1:]
-		}
-	}
-	oldOffset := m.offset
-	firstSurvived := len(m.queue) > 0 && m.queue[0].captionID != captionID
-	kept := m.queue[:0]
-	for index, segment := range m.queue {
-		remaining := len(segment.samples)
-		if index == 0 {
-			remaining -= oldOffset
-		}
-		if segment.captionID == captionID {
-			m.queued -= remaining
-			continue
-		}
-		kept = append(kept, segment)
-	}
-	m.queue = kept
-	if firstSurvived {
-		m.offset = oldOffset
-	} else {
-		m.offset = 0
-	}
+	return m.queued / speechChannels
 }
 
 func (m *SpeechMixer) TakeStereo(frames int) []int16 {
@@ -253,15 +259,28 @@ func (m *SpeechMixer) TakeStereo(frames int) []int16 {
 	defer m.mu.Unlock()
 	written := 0
 	for written < len(output) && len(m.queue) > 0 {
-		current := m.queue[0].samples
-		count := min(len(output)-written, len(current)-m.offset)
-		copy(output[written:written+count], current[m.offset:m.offset+count])
+		current := &m.queue[0]
+		if current.playback == nil {
+			backlogSamples := max(0, m.queued-len(current.source))
+			backlogSeconds := float64(backlogSamples/speechChannels) / speechSampleRate
+			rate := playbackRateForBacklog(backlogSeconds)
+			current.playback = timeStretchStereo(current.source, rate)
+			if len(current.playback) == 0 {
+				current.playback = append([]int16(nil), current.source...)
+			}
+			log.Printf("[VoiceTranslate] Playing speech rate=%.2fx backlog=%.2fs", rate, backlogSeconds)
+		}
+		count := min(len(output)-written, len(current.playback)-current.offset)
+		copy(output[written:written+count], current.playback[current.offset:current.offset+count])
 		written += count
-		m.offset += count
-		m.queued -= count
-		if m.offset == len(current) {
+		current.offset += count
+		if current.offset == len(current.playback) {
+			m.queued -= len(current.source)
 			m.queue = m.queue[1:]
-			m.offset = 0
+			select {
+			case m.spaceAvailable <- struct{}{}:
+			default:
+			}
 		}
 	}
 	return output

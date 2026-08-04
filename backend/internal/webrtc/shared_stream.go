@@ -16,10 +16,17 @@ import (
 )
 
 const (
-	sharedVideoBuffer    = 120
-	sharedAudioBuffer    = 120
-	sharedSubtitleBuffer = 32
-	videoPrebuffer       = 900 * time.Millisecond
+	sharedVideoBuffer        = 120
+	sharedAudioBuffer        = 120
+	sharedSubtitleBuffer     = 32
+	videoPrebuffer           = 900 * time.Millisecond
+	sharedQueueStallGrace    = 500 * time.Millisecond
+	sharedVideoOverflow      = 60
+	sharedAudioOverflow      = 50
+	sharedSubtitleOverflow   = 16
+	sharedVideoQueueBytes    = 32 << 20
+	sharedAudioQueueBytes    = 8 << 20
+	sharedSubtitleQueueBytes = 2 << 20
 )
 
 type sharedSample struct {
@@ -32,10 +39,10 @@ type sharedSample struct {
 
 type sharedSubscriber struct {
 	peer          *Peer
-	video         chan sharedSample
-	audio         chan sharedSample
-	subtitles     chan []byte
-	subtitleJSON  chan []byte
+	video         *subscriberQueue[sharedSample]
+	audio         *subscriberQueue[sharedSample]
+	subtitles     *subscriberQueue[[]byte]
+	subtitleJSON  *subscriberQueue[[]byte]
 	subtitleRead  *io.PipeReader
 	subtitleWrite *io.PipeWriter
 	clock         *sharedMediaClock
@@ -92,11 +99,15 @@ func (s *SharedStream) AddPeer(peer *Peer) error {
 
 	subtitleRead, subtitleWrite := io.Pipe()
 	sub := &sharedSubscriber{
-		peer:          peer,
-		video:         make(chan sharedSample, sharedVideoBuffer),
-		audio:         make(chan sharedSample, sharedAudioBuffer),
-		subtitles:     make(chan []byte, sharedSubtitleBuffer),
-		subtitleJSON:  make(chan []byte, sharedSubtitleBuffer),
+		peer: peer,
+		video: newWeightedSubscriberQueue(sharedVideoBuffer, sharedVideoOverflow, sharedVideoQueueBytes,
+			func(sample sharedSample) int { return len(sample.data) }),
+		audio: newWeightedSubscriberQueue(sharedAudioBuffer, sharedAudioOverflow, sharedAudioQueueBytes,
+			func(sample sharedSample) int { return len(sample.data) }),
+		subtitles: newWeightedSubscriberQueue(sharedSubtitleBuffer, sharedSubtitleOverflow, sharedSubtitleQueueBytes,
+			func(data []byte) int { return len(data) }),
+		subtitleJSON: newWeightedSubscriberQueue(sharedSubtitleBuffer, sharedSubtitleOverflow, sharedSubtitleQueueBytes,
+			func(data []byte) int { return len(data) }),
 		subtitleRead:  subtitleRead,
 		subtitleWrite: subtitleWrite,
 		clock:         newSharedMediaClock(),
@@ -144,47 +155,19 @@ func (s *SharedStream) AddPeer(peer *Peer) error {
 }
 
 func (s *SharedStream) enqueueVideo(sub *sharedSubscriber, sample sharedSample) bool {
-	select {
-	case <-sub.done:
-		return false
-	case sub.video <- sample:
-		return true
-	default:
-		return false
-	}
+	return sub.video.Push(sample)
 }
 
 func (s *SharedStream) enqueueAudio(sub *sharedSubscriber, sample sharedSample) bool {
-	select {
-	case <-sub.done:
-		return false
-	case sub.audio <- sample:
-		return true
-	default:
-		return false
-	}
+	return sub.audio.Push(sample)
 }
 
 func (s *SharedStream) enqueueSubtitle(sub *sharedSubscriber, data []byte) bool {
-	select {
-	case <-sub.done:
-		return false
-	case sub.subtitles <- data:
-		return true
-	default:
-		return false
-	}
+	return sub.subtitles.Push(data)
 }
 
 func (s *SharedStream) enqueueSubtitleJSON(sub *sharedSubscriber, data []byte) bool {
-	select {
-	case <-sub.done:
-		return false
-	case sub.subtitleJSON <- data:
-		return true
-	default:
-		return false
-	}
+	return sub.subtitleJSON.Push(data)
 }
 
 func (s *SharedStream) writeVideo(sub *sharedSubscriber) {
@@ -201,38 +184,37 @@ func (s *SharedStream) writeVideo(sub *sharedSubscriber) {
 		}
 	}()
 	for {
-		select {
-		case <-sub.done:
+		sample, ok := sub.video.Pop(ctx, sub.done)
+		if !ok {
 			return
-		case sample := <-sub.video:
-			if !sample.bootstrap {
-				wallBase, ptsBase, revision := sub.clock.StartVideo(sample.pts)
-				if !prebuffered {
-					if err := waitUntil(ctx, wallBase); err != nil {
-						return
-					}
-					prebuffered = true
-				}
-				if sample.hasPTS && revision != clockRevision {
-					pacer.ResetEpoch(wallBase, ptsBase)
-					clockRevision = revision
-				}
-				resynced, err := pacer.Pace(ctx, sample.pts, sample.hasPTS, sample.duration)
-				if err != nil {
+		}
+		if !sample.bootstrap {
+			wallBase, ptsBase, revision := sub.clock.StartVideo(sample.pts)
+			if !prebuffered {
+				if err := waitUntil(ctx, wallBase); err != nil {
 					return
 				}
-				if resynced {
-					if sub.clock.Rebase(clockRevision, pacer.wallBase, pacer.ptsBase) {
-						clockRevision++
-					}
-					log.Printf("[WebRTC] Video pacer resynchronized peer=%s lag-limit=%s", sub.peer.ID, maxPacingLag)
-				}
+				prebuffered = true
 			}
-			if err := sub.peer.WriteVideoSample(sample.data, sample.duration); err != nil {
-				log.Printf("[WebRTC] Video fanout failed for peer %s: %v", sub.peer.ID, err)
-				s.RemovePeer(sub.peer.ID)
+			if sample.hasPTS && revision != clockRevision {
+				pacer.ResetEpoch(wallBase, ptsBase)
+				clockRevision = revision
+			}
+			resynced, err := pacer.Pace(ctx, sample.pts, sample.hasPTS, sample.duration)
+			if err != nil {
 				return
 			}
+			if resynced {
+				if sub.clock.Rebase(clockRevision, pacer.wallBase, pacer.ptsBase) {
+					clockRevision++
+				}
+				log.Printf("[WebRTC] Video pacer resynchronized peer=%s lag-limit=%s", sub.peer.ID, maxPacingLag)
+			}
+		}
+		if err := sub.peer.WriteVideoSample(sample.data, sample.duration); err != nil {
+			log.Printf("[WebRTC] Video fanout failed for peer %s: %v", sub.peer.ID, err)
+			s.RemovePeer(sub.peer.ID)
+			return
 		}
 	}
 }
@@ -251,48 +233,48 @@ func (s *SharedStream) writeAudio(sub *sharedSubscriber) {
 		}
 	}()
 	for {
-		select {
-		case <-sub.done:
+		sample, ok := sub.audio.Pop(ctx, sub.done)
+		if !ok {
 			return
-		case sample := <-sub.audio:
-			wallBase, ptsBase, revision, err := sub.clock.WaitEpoch(ctx)
-			if err != nil {
-				return
+		}
+		wallBase, ptsBase, revision, err := sub.clock.WaitEpoch(ctx)
+		if err != nil {
+			return
+		}
+		if sample.hasPTS && (!prebuffered || revision != clockRevision) {
+			pacer.ResetEpoch(wallBase, ptsBase)
+			clockRevision = revision
+			prebuffered = true
+		}
+		resynced, err := pacer.Pace(ctx, sample.pts, sample.hasPTS, sample.duration)
+		if err != nil {
+			return
+		}
+		if resynced {
+			if sub.clock.Rebase(clockRevision, pacer.wallBase, pacer.ptsBase) {
+				clockRevision++
 			}
-			if sample.hasPTS && (!prebuffered || revision != clockRevision) {
-				pacer.ResetEpoch(wallBase, ptsBase)
-				clockRevision = revision
-				prebuffered = true
-			}
-			resynced, err := pacer.Pace(ctx, sample.pts, sample.hasPTS, sample.duration)
-			if err != nil {
-				return
-			}
-			if resynced {
-				if sub.clock.Rebase(clockRevision, pacer.wallBase, pacer.ptsBase) {
-					clockRevision++
-				}
-				log.Printf("[WebRTC] Audio pacer resynchronized peer=%s lag-limit=%s", sub.peer.ID, maxPacingLag)
-			}
-			if err := sub.peer.WriteAudioSample(sample.data, sample.duration); err != nil {
-				log.Printf("[WebRTC] Audio fanout failed for peer %s: %v", sub.peer.ID, err)
-				s.RemovePeer(sub.peer.ID)
-				return
-			}
+			log.Printf("[WebRTC] Audio pacer resynchronized peer=%s lag-limit=%s", sub.peer.ID, maxPacingLag)
+		}
+		if err := sub.peer.WriteAudioSample(sample.data, sample.duration); err != nil {
+			log.Printf("[WebRTC] Audio fanout failed for peer %s: %v", sub.peer.ID, err)
+			s.RemovePeer(sub.peer.ID)
+			return
 		}
 	}
 }
 
 func (s *SharedStream) writeSubtitles(sub *sharedSubscriber) {
+	ctx, cancel := context.WithCancel(s.ctx)
+	defer cancel()
 	for {
-		select {
-		case <-sub.done:
+		data, ok := sub.subtitles.Pop(ctx, sub.done)
+		if !ok {
 			return
-		case data := <-sub.subtitles:
-			if _, err := sub.subtitleWrite.Write(data); err != nil {
-				s.RemovePeer(sub.peer.ID)
-				return
-			}
+		}
+		if _, err := sub.subtitleWrite.Write(data); err != nil {
+			s.RemovePeer(sub.peer.ID)
+			return
 		}
 	}
 }
@@ -311,14 +293,13 @@ func (s *SharedStream) writeSubtitleJSON(sub *sharedSubscriber) {
 		return
 	}
 	for {
-		select {
-		case <-sub.done:
+		data, ok := sub.subtitleJSON.Pop(ctx, sub.done)
+		if !ok {
 			return
-		case data := <-sub.subtitleJSON:
-			if err := sub.peer.SendSubtitle(data); err != nil {
-				s.RemovePeer(sub.peer.ID)
-				return
-			}
+		}
+		if err := sub.peer.SendSubtitle(data); err != nil {
+			s.RemovePeer(sub.peer.ID)
+			return
 		}
 	}
 }
@@ -511,11 +492,7 @@ func (s *SharedStream) RunAudio(reader io.Reader) error {
 			continue
 		}
 		sample := sharedSample{data: packet, duration: 20 * time.Millisecond}
-		for _, sub := range s.subscriberSnapshot() {
-			if !s.enqueueAudio(sub, sample) {
-				s.RemovePeer(sub.peer.ID)
-			}
-		}
+		s.publishAudioSample(sample)
 	}
 }
 
@@ -527,10 +504,14 @@ func (s *SharedStream) RunAudioRaw(reader io.Reader) error {
 			return err
 		}
 		sample := sharedSample{data: frame.Data, duration: frame.Duration, pts: frame.PTS, hasPTS: frame.HasPTS}
-		for _, sub := range s.subscriberSnapshot() {
-			if !s.enqueueAudio(sub, sample) {
-				s.RemovePeer(sub.peer.ID)
-			}
+		s.publishAudioSample(sample)
+	}
+}
+
+func (s *SharedStream) publishAudioSample(sample sharedSample) {
+	for _, sub := range s.subscriberSnapshot() {
+		if !s.enqueueAudio(sub, sample) {
+			s.RemovePeer(sub.peer.ID)
 		}
 	}
 }

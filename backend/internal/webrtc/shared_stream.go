@@ -16,14 +16,17 @@ import (
 )
 
 const (
-	sharedVideoBuffer      = 120
-	sharedAudioBuffer      = 120
-	sharedSubtitleBuffer   = 32
-	videoPrebuffer         = 900 * time.Millisecond
-	sharedQueueStallGrace  = 500 * time.Millisecond
-	sharedVideoOverflow    = 60
-	sharedAudioOverflow    = 50
-	sharedSubtitleOverflow = 16
+	sharedVideoBuffer        = 120
+	sharedAudioBuffer        = 120
+	sharedSubtitleBuffer     = 32
+	videoPrebuffer           = 900 * time.Millisecond
+	sharedQueueStallGrace    = 500 * time.Millisecond
+	sharedVideoOverflow      = 60
+	sharedAudioOverflow      = 50
+	sharedSubtitleOverflow   = 16
+	sharedVideoQueueBytes    = 32 << 20
+	sharedAudioQueueBytes    = 8 << 20
+	sharedSubtitleQueueBytes = 2 << 20
 )
 
 type sharedSample struct {
@@ -96,11 +99,15 @@ func (s *SharedStream) AddPeer(peer *Peer) error {
 
 	subtitleRead, subtitleWrite := io.Pipe()
 	sub := &sharedSubscriber{
-		peer:          peer,
-		video:         newSubscriberQueue[sharedSample](sharedVideoBuffer, sharedVideoOverflow),
-		audio:         newSubscriberQueue[sharedSample](sharedAudioBuffer, sharedAudioOverflow),
-		subtitles:     newSubscriberQueue[[]byte](sharedSubtitleBuffer, sharedSubtitleOverflow),
-		subtitleJSON:  newSubscriberQueue[[]byte](sharedSubtitleBuffer, sharedSubtitleOverflow),
+		peer: peer,
+		video: newWeightedSubscriberQueue(sharedVideoBuffer, sharedVideoOverflow, sharedVideoQueueBytes,
+			func(sample sharedSample) int { return len(sample.data) }),
+		audio: newWeightedSubscriberQueue(sharedAudioBuffer, sharedAudioOverflow, sharedAudioQueueBytes,
+			func(sample sharedSample) int { return len(sample.data) }),
+		subtitles: newWeightedSubscriberQueue(sharedSubtitleBuffer, sharedSubtitleOverflow, sharedSubtitleQueueBytes,
+			func(data []byte) int { return len(data) }),
+		subtitleJSON: newWeightedSubscriberQueue(sharedSubtitleBuffer, sharedSubtitleOverflow, sharedSubtitleQueueBytes,
+			func(data []byte) int { return len(data) }),
 		subtitleRead:  subtitleRead,
 		subtitleWrite: subtitleWrite,
 		clock:         newSharedMediaClock(),

@@ -391,6 +391,26 @@ func TestSubscriberQueueRejectsPersistentOverflow(t *testing.T) {
 	}
 }
 
+func TestSubscriberQueueRejectsByteBudgetOverflow(t *testing.T) {
+	queue := newWeightedSubscriberQueue[[]byte](2, 1, 3, func(value []byte) int { return len(value) })
+	if !queue.Push([]byte("ab")) {
+		t.Fatal("initial push failed")
+	}
+	if queue.Push([]byte("cd")) {
+		t.Fatal("push beyond byte budget succeeded")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	if _, ok := queue.Pop(ctx, done); !ok {
+		t.Fatal("Pop failed")
+	}
+	if !queue.Push([]byte("cd")) {
+		t.Fatal("released byte budget was not reusable")
+	}
+}
+
 func TestSlowSubscriberDoesNotBlockHealthySubscriber(t *testing.T) {
 	stream := NewSharedStream()
 	newTestSubscriber := func(id string) *sharedSubscriber {

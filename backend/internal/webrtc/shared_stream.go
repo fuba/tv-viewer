@@ -16,10 +16,11 @@ import (
 )
 
 const (
-	sharedVideoBuffer    = 120
-	sharedAudioBuffer    = 120
-	sharedSubtitleBuffer = 32
-	videoPrebuffer       = 900 * time.Millisecond
+	sharedVideoBuffer     = 120
+	sharedAudioBuffer     = 120
+	sharedSubtitleBuffer  = 32
+	videoPrebuffer        = 900 * time.Millisecond
+	sharedQueueStallGrace = 500 * time.Millisecond
 )
 
 type sharedSample struct {
@@ -144,45 +145,48 @@ func (s *SharedStream) AddPeer(peer *Peer) error {
 }
 
 func (s *SharedStream) enqueueVideo(sub *sharedSubscriber, sample sharedSample) bool {
-	select {
-	case <-sub.done:
-		return false
-	case sub.video <- sample:
-		return true
-	default:
-		return false
-	}
+	return enqueueWithGrace(s.ctx.Done(), sub.done, sub.video, sample)
 }
 
 func (s *SharedStream) enqueueAudio(sub *sharedSubscriber, sample sharedSample) bool {
-	select {
-	case <-sub.done:
-		return false
-	case sub.audio <- sample:
-		return true
-	default:
-		return false
-	}
+	return enqueueWithGrace(s.ctx.Done(), sub.done, sub.audio, sample)
 }
 
 func (s *SharedStream) enqueueSubtitle(sub *sharedSubscriber, data []byte) bool {
-	select {
-	case <-sub.done:
-		return false
-	case sub.subtitles <- data:
-		return true
-	default:
-		return false
-	}
+	return enqueueWithGrace(s.ctx.Done(), sub.done, sub.subtitles, data)
 }
 
 func (s *SharedStream) enqueueSubtitleJSON(sub *sharedSubscriber, data []byte) bool {
+	return enqueueWithGrace(s.ctx.Done(), sub.done, sub.subtitleJSON, data)
+}
+
+// enqueueWithGrace preserves a bounded queue across short pacer stalls. The
+// startup prebuffer and A/V timestamp offset can otherwise fill a healthy
+// subscriber's queue at the exact moment its writer is about to resume.
+func enqueueWithGrace[T any](streamDone, subscriberDone <-chan struct{}, queue chan<- T, value T) bool {
 	select {
-	case <-sub.done:
+	case <-streamDone:
 		return false
-	case sub.subtitleJSON <- data:
+	case <-subscriberDone:
+		return false
+	default:
+	}
+	select {
+	case queue <- value:
 		return true
 	default:
+	}
+
+	timer := time.NewTimer(sharedQueueStallGrace)
+	defer timer.Stop()
+	select {
+	case <-streamDone:
+		return false
+	case <-subscriberDone:
+		return false
+	case queue <- value:
+		return true
+	case <-timer.C:
 		return false
 	}
 }

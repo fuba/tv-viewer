@@ -347,6 +347,35 @@ func TestSharedStreamNotifiesWhenPeerIsRemoved(t *testing.T) {
 	}
 }
 
+func TestSharedStreamWaitsForTransientAudioQueueBackpressure(t *testing.T) {
+	stream := NewSharedStream()
+	sub := &sharedSubscriber{
+		audio: make(chan sharedSample, 1),
+		done:  make(chan struct{}),
+	}
+	sub.audio <- sharedSample{data: []byte("queued")}
+
+	drained := make(chan struct{})
+	go func() {
+		time.Sleep(20 * time.Millisecond)
+		<-sub.audio
+		close(drained)
+	}()
+
+	started := time.Now()
+	if !stream.enqueueAudio(sub, sharedSample{data: []byte("next")}) {
+		t.Fatal("enqueueAudio rejected transient backpressure")
+	}
+	if elapsed := time.Since(started); elapsed < 15*time.Millisecond {
+		t.Fatalf("enqueueAudio returned before queue drained: %s", elapsed)
+	}
+	select {
+	case <-drained:
+	case <-time.After(time.Second):
+		t.Fatal("audio queue was not drained")
+	}
+}
+
 // TestRTPPacketizer tests RTP packetization
 func TestRTPPacketizer(t *testing.T) {
 	packetizer := NewRTPPacketizer(12345, 67890)

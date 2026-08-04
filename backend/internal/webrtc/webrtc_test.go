@@ -2,6 +2,7 @@ package webrtc
 
 import (
 	"bytes"
+	"context"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -298,7 +299,7 @@ func TestRunSubtitlesRawPreservesJSONMessage(t *testing.T) {
 	stream := NewSharedStream()
 	sub := &sharedSubscriber{
 		peer:         &Peer{ID: "test"},
-		subtitleJSON: make(chan []byte, 1),
+		subtitleJSON: newSubscriberQueue[[]byte](1, 1),
 		done:         make(chan struct{}),
 	}
 	stream.subscribers["test"] = sub
@@ -311,13 +312,14 @@ func TestRunSubtitlesRawPreservesJSONMessage(t *testing.T) {
 	if err := stream.RunSubtitlesRaw(&framed); !errors.Is(err, io.EOF) {
 		t.Fatalf("RunSubtitlesRaw error = %v, want EOF", err)
 	}
-	select {
-	case got := <-sub.subtitleJSON:
-		if !bytes.Equal(got, message) {
-			t.Fatalf("subtitle = %s, want %s", got, message)
-		}
-	default:
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, ok := sub.subtitleJSON.Pop(ctx, sub.done)
+	if !ok {
 		t.Fatal("subtitle was not delivered")
+	}
+	if !bytes.Equal(got, message) {
+		t.Fatalf("subtitle = %s, want %s", got, message)
 	}
 }
 
@@ -347,32 +349,103 @@ func TestSharedStreamNotifiesWhenPeerIsRemoved(t *testing.T) {
 	}
 }
 
-func TestSharedStreamWaitsForTransientAudioQueueBackpressure(t *testing.T) {
-	stream := NewSharedStream()
-	sub := &sharedSubscriber{
-		audio: make(chan sharedSample, 1),
-		done:  make(chan struct{}),
+func TestSubscriberQueuePreservesTransientOverflowWithoutBlocking(t *testing.T) {
+	queue := newSubscriberQueue[string](1, 1)
+	if !queue.Push("queued") {
+		t.Fatal("initial push failed")
 	}
-	sub.audio <- sharedSample{data: []byte("queued")}
-
-	drained := make(chan struct{})
-	go func() {
-		time.Sleep(20 * time.Millisecond)
-		<-sub.audio
-		close(drained)
-	}()
 
 	started := time.Now()
-	if !stream.enqueueAudio(sub, sharedSample{data: []byte("next")}) {
-		t.Fatal("enqueueAudio rejected transient backpressure")
+	if !queue.Push("overflow") {
+		t.Fatal("transient overflow was rejected")
 	}
-	if elapsed := time.Since(started); elapsed < 15*time.Millisecond {
-		t.Fatalf("enqueueAudio returned before queue drained: %s", elapsed)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("overflow push blocked publisher for %s", elapsed)
 	}
+	if queue.Push("beyond-hard-limit") {
+		t.Fatal("push beyond hard limit succeeded")
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	for _, want := range []string{"queued", "overflow"} {
+		got, ok := queue.Pop(ctx, done)
+		if !ok || got != want {
+			t.Fatalf("Pop() = %q, %v, want %q, true", got, ok, want)
+		}
+	}
+}
+
+func TestSubscriberQueueRejectsPersistentOverflow(t *testing.T) {
+	queue := newSubscriberQueue[string](1, 2)
+	now := time.Unix(1, 0)
+	queue.now = func() time.Time { return now }
+	if !queue.Push("queued") || !queue.Push("overflow") {
+		t.Fatal("queue setup failed")
+	}
+
+	now = now.Add(sharedQueueStallGrace)
+	if queue.Push("late") {
+		t.Fatal("persistent overflow was accepted")
+	}
+}
+
+func TestSlowSubscriberDoesNotBlockHealthySubscriber(t *testing.T) {
+	stream := NewSharedStream()
+	newTestSubscriber := func(id string) *sharedSubscriber {
+		reader, writer := io.Pipe()
+		return &sharedSubscriber{
+			peer:          &Peer{ID: id},
+			audio:         newSubscriberQueue[sharedSample](1, 1),
+			subtitleRead:  reader,
+			subtitleWrite: writer,
+			done:          make(chan struct{}),
+		}
+	}
+	slow := newTestSubscriber("slow")
+	healthy := newTestSubscriber("healthy")
+	defer healthy.subtitleRead.Close()
+	defer healthy.subtitleWrite.Close()
+	slow.audio.Push(sharedSample{})
+	slow.audio.Push(sharedSample{})
+	stream.subscribers[slow.peer.ID] = slow
+	stream.subscribers[healthy.peer.ID] = healthy
+
+	started := time.Now()
+	sample := sharedSample{data: []byte("next")}
+	stream.publishAudioSample(sample)
+	if elapsed := time.Since(started); elapsed > 100*time.Millisecond {
+		t.Fatalf("audio publisher blocked for %s", elapsed)
+	}
+	if stream.SubscriberCount() != 1 {
+		t.Fatalf("subscriber count = %d, want 1", stream.SubscriberCount())
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	got, ok := healthy.audio.Pop(ctx, healthy.done)
+	if !ok || !bytes.Equal(got.data, sample.data) {
+		t.Fatalf("healthy subscriber got %q, %v", got.data, ok)
+	}
+}
+
+func TestSubscriberQueueStopsWaitingWhenSubscriberEnds(t *testing.T) {
+	queue := newSubscriberQueue[string](1, 1)
+	done := make(chan struct{})
+	result := make(chan bool, 1)
+	go func() {
+		_, ok := queue.Pop(context.Background(), done)
+		result <- ok
+	}()
+	close(done)
+
 	select {
-	case <-drained:
+	case ok := <-result:
+		if ok {
+			t.Fatal("Pop succeeded after subscriber ended")
+		}
 	case <-time.After(time.Second):
-		t.Fatal("audio queue was not drained")
+		t.Fatal("Pop did not unblock after subscriber ended")
 	}
 }
 

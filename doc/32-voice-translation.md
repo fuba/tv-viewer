@@ -71,7 +71,7 @@ For a backend process run directly on the host, set `VOICETRANSLATE_TOKEN_FILE` 
 - Every translation event carries its backend channel and stream identity. The browser rejects delayed events from retired streams so a channel change cannot mix two histories.
 - ARIB captions remain independently controlled by the existing subtitle toggle and may be shown with the translation log.
 - While translation is ready, original audio is replaced with synthesized audio or silence on the same 48 kHz stereo WebRTC timeline. If WSS setup fails or disconnects, TV Viewer immediately falls back to broadcast audio.
-- WebRTC delivery applies brief backpressure during encoder startup. The translation pipeline's initial A/V timestamp offset therefore cannot be mistaken for a stalled viewer and disconnect an otherwise healthy video and audio stream.
+- Each WebRTC subscriber has a bounded FIFO overflow reserve during encoder startup. The translation pipeline's initial A/V timestamp offset therefore cannot be mistaken for a stalled viewer, while one genuinely slow viewer cannot block the shared stream.
 - Synthesized utterances stay in FIFO order and are never evicted to catch up. TV Viewer uses pitch-preserving WSOLA time compression as the unplayed backlog grows: 1.1x at 1.5 seconds, 1.2x at 4 seconds, 1.3x at 8 seconds, 1.5x at 12 seconds, 1.75x at 20 seconds, and 2x at 30 seconds. It returns to normal speed as the backlog clears.
 - The speech queue applies backpressure at two minutes instead of discarding audio. If live PCM upload cannot keep pace for ten seconds, translation stops and broadcast audio resumes rather than silently omitting input frames.
 - A late `speech_cancelled` event does not remove synthesized audio that TV Viewer has already received.

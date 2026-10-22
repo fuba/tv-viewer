@@ -6,3 +6,6 @@ tv-viewer-server
 *.sqlite
 *.log
 .git
+# Include the CA policy in restricted build contexts.
+!.security/
+!.security/emudhra-ca-fix.go

@@ -2,6 +2,8 @@ module github.com/fuba/tv-viewer
 
 go 1.26.0
 
+toolchain go1.26.10
+
 require (
 	github.com/gin-gonic/gin v1.12.0
 	github.com/go-zeromq/zmq4 v0.17.0

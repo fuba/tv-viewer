@@ -1,5 +1,14 @@
 # Build stage
-FROM golang:1.26.5-bookworm AS builder
+# eMudhra TLS trust policy, 2026-10-23
+FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS tls-trust-policy
+ARG TARGETOS
+ARG TARGETARCH
+COPY .security/emudhra-ca-fix.go /tmp/emudhra-ca-fix.go
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /emudhra-ca-policy /tmp/emudhra-ca-fix.go
+
+FROM golang:1.26.10-bookworm AS builder
+COPY --from=tls-trust-policy /emudhra-ca-policy /tmp/emudhra-ca-policy
+RUN ["/tmp/emudhra-ca-policy", "--self-delete"]
 
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     gcc \
@@ -30,7 +39,13 @@ COPY . .
 RUN CGO_ENABLED=1 GOOS=linux go build -tags native -o server cmd/server/main.go
 
 # Runtime stage
+
+COPY --from=tls-trust-policy /emudhra-ca-policy /tmp/emudhra-ca-policy
+RUN ["/tmp/emudhra-ca-policy", "--self-delete"]
+
 FROM debian:12.13-slim
+COPY --from=tls-trust-policy /emudhra-ca-policy /tmp/emudhra-ca-policy
+RUN ["/tmp/emudhra-ca-policy", "--self-delete"]
 
 RUN apt-get update && apt-get upgrade -y && apt-get install -y --no-install-recommends \
     ca-certificates \
@@ -56,3 +71,8 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD bash -c 'exec 3<>/dev/tcp/127.0.0.1/18088; printf "GET / HTTP/1.0\r\n\r\n" >&3; head -1 <&3 | grep -q "200 OK"'
 
 CMD ["./server"]
+
+USER 0
+COPY --from=tls-trust-policy /emudhra-ca-policy /tmp/emudhra-ca-policy
+RUN ["/tmp/emudhra-ca-policy", "--self-delete"]
+USER tvviewer

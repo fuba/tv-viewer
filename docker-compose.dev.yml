@@ -33,7 +33,7 @@ services:
       - tv-viewer-net
 
   frontend:
-    image: node:24.18.0-alpine3.24
+    image: node:24.22.1-alpine3.24
     user: "${UID:-1000}:${GID:-1000}"
     working_dir: /app
     ports:

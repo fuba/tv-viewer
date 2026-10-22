@@ -1,0 +1,4 @@
+#!/bin/sh
+# SPDX-License-Identifier: MIT
+set -eu
+exec "${SECURITY_MISE_BIN:-$HOME/.local/bin/mise}" "$@"

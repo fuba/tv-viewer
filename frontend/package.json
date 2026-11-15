@@ -12,7 +12,7 @@
   },
   "devDependencies": {
     "@sveltejs/vite-plugin-svelte": "^7.3.1",
-    "@tsconfig/svelte": "^5.0.8",
+    "@tsconfig/svelte": "^5.0.9",
     "autoprefixer": "^10.6.2",
     "postcss": "^8.5.32",
     "svelte": "^5.57.1",

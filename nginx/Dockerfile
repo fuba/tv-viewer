@@ -1,5 +1,5 @@
 # eMudhra TLS trust policy, 2026-10-23
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS tls-trust-policy
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS tls-trust-policy
 ARG TARGETOS
 ARG TARGETARCH
 COPY .security/emudhra-ca-fix.go /tmp/emudhra-ca-fix.go

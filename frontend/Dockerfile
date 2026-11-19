@@ -1,12 +1,12 @@
 # Build stage
 # eMudhra TLS trust policy, 2026-10-23
-FROM --platform=$BUILDPLATFORM golang:1.27.3-alpine AS tls-trust-policy
+FROM --platform=$BUILDPLATFORM golang:1.27.4-alpine AS tls-trust-policy
 ARG TARGETOS
 ARG TARGETARCH
 COPY .security/emudhra-ca-fix.go /tmp/emudhra-ca-fix.go
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -trimpath -ldflags="-s -w" -o /emudhra-ca-policy /tmp/emudhra-ca-fix.go
 
-FROM node:24.22.1-alpine3.24 AS builder
+FROM node:24.22.3-alpine3.24 AS builder
 COPY --from=tls-trust-policy /emudhra-ca-policy /tmp/emudhra-ca-policy
 RUN ["/tmp/emudhra-ca-policy", "--self-delete"]
 
